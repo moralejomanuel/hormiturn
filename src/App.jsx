@@ -1,11 +1,6 @@
-// src/App.jsx
-// Reemplazar todo el contenido del archivo con este código.
-// Requiere: npm install @supabase/supabase-js
-
 import { useState, useEffect } from "react";
 import { supabase } from "./supabase";
 
-// ─── CONSTANTES ───────────────────────────────────────────────────────────────
 const TRUCK_CAPACITY = 8;
 const STATUS_CONFIG = {
   pendiente:   { label:"Pendiente",   color:"#F59E0B", bg:"#FEF3C7", dot:"#F59E0B" },
@@ -17,62 +12,48 @@ const STATUS_CONFIG = {
 };
 const STATUS_FLOW = ["pendiente","en_planta","en_ruta","descargando","completado"];
 
-// ─── HELPERS ──────────────────────────────────────────────────────────────────
 function genId() { return Date.now().toString(36)+Math.random().toString(36).slice(2,6); }
 function fmtTime(ts) { return new Date(ts).toLocaleTimeString("es-AR",{hour:"2-digit",minute:"2-digit"}); }
 function fmtDate(ts) { return new Date(ts).toLocaleDateString("es-AR",{day:"2-digit",month:"2-digit",year:"numeric"}); }
 function dayKey(ts) { const d=new Date(ts); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`; }
 function parseDay(k) { const [y,m,d]=k.split("-").map(Number); return new Date(y,m-1,d); }
-function estDuration(m3) { return (m3*10+60)*60000; }
 function overlaps(s1,e1,s2,e2) { return s1<e2&&e1>s2; }
-function truckConflicts(turns,truck,scheduledAt,m3,editId=null) {
-  const s1=scheduledAt,e1=scheduledAt+estDuration(m3);
-  return turns.filter(t=>t.id!==editId&&!["cancelado"].includes(t.status)&&Array.isArray(t.trucks)&&t.trucks.includes(truck)&&overlaps(s1,e1,t.scheduledAt,t.scheduledAt+estDuration(t.m3)));
+function truckConflicts(turns,truck,scheduledAt,endAt,editId=null) {
+  return turns.filter(t=>
+    t.id!==editId &&
+    !["cancelado"].includes(t.status) &&
+    Array.isArray(t.trucks) && t.trucks.includes(truck) &&
+    overlaps(scheduledAt,endAt,t.scheduledAt,t.endAt||t.scheduledAt+3600000)
+  );
 }
 
-// Supabase devuelve snake_case, convertimos a camelCase
 function dbToTurn(row) {
   return {
-    id:          row.id,
-    client:      row.client,
-    plant:       row.plant,
-    trucks:      row.trucks,
-    m3:          row.m3,
-    status:      row.status,
-    operator:    row.operator,
-    destination: row.destination,
-    notes:       row.notes||"",
-    scheduledAt: row.scheduled_at,
-    createdAt:   row.created_at,
+    id:row.id, client:row.client, plant:row.plant, trucks:row.trucks,
+    m3:row.m3, status:row.status, operator:row.operator,
+    destination:row.destination, notes:row.notes||"",
+    scheduledAt:row.scheduled_at, endAt:row.end_at, createdAt:row.created_at,
   };
 }
 function turnToDb(t) {
   return {
-    id:           t.id,
-    client:       t.client,
-    plant:        t.plant,
-    trucks:       t.trucks,
-    m3:           t.m3,
-    status:       t.status,
-    operator:     t.operator,
-    destination:  t.destination,
-    notes:        t.notes||"",
-    scheduled_at: t.scheduledAt,
-    created_at:   t.createdAt,
+    id:t.id, client:t.client, plant:t.plant, trucks:t.trucks, m3:t.m3,
+    status:t.status, operator:t.operator, destination:t.destination,
+    notes:t.notes||"", scheduled_at:t.scheduledAt, end_at:t.endAt,
+    created_at:t.createdAt,
   };
 }
 
-// ─── APP ──────────────────────────────────────────────────────────────────────
 export default function App() {
   const [currentUser,setCurrentUser] = useState(null);
-  const [turns,setTurns]   = useState([]);
-  const [plants,setPlants] = useState([]);
-  const [trucks,setTrucks] = useState([]);
-  const [users,setUsers]   = useState([]);
-  const [loading,setLoading] = useState(true);
-
-  const [view,setView]               = useState("dashboard");
-  const [showForm,setShowForm]       = useState(false);
+  const [turns,setTurns]       = useState([]);
+  const [plants,setPlants]     = useState([]);
+  const [trucks,setTrucks]     = useState([]);
+  const [users,setUsers]       = useState([]);
+  const [passwords,setPasswords] = useState({});
+  const [loading,setLoading]   = useState(true);
+  const [view,setView]         = useState("dashboard");
+  const [showForm,setShowForm] = useState(false);
   const [editingTurn,setEditingTurn] = useState(null);
   const [showSettings,setShowSettings] = useState(false);
   const [filterStatus,setFilterStatus] = useState("all");
@@ -82,135 +63,123 @@ export default function App() {
   const [dashDay,setDashDay]           = useState(dayKey(Date.now()));
   const [now,setNow] = useState(Date.now());
 
-  // ── Cargar datos iniciales ──
   useEffect(()=>{
     async function load() {
       setLoading(true);
-      // Config
       const {data:cfg} = await supabase.from("config").select("*");
-      if (cfg) {
+      if(cfg) {
         cfg.forEach(row=>{
           if(row.key==="plants") setPlants(row.value);
           if(row.key==="trucks") setTrucks(row.value);
-          if(row.key==="users")  setUsers(row.value);
+          if(row.key==="users")  { setUsers(row.value); if(row.passwords) setPasswords(row.passwords); }
         });
       }
-      // Turnos
       const {data:dbTurns} = await supabase.from("turns").select("*").order("scheduled_at");
-      if (dbTurns) setTurns(dbTurns.map(dbToTurn));
+      if(dbTurns) setTurns(dbTurns.map(dbToTurn));
       setLoading(false);
     }
     load();
   },[]);
 
-  // ── Suscripción en tiempo real para turnos ──
   useEffect(()=>{
-    const channel = supabase
-      .channel("turns-realtime")
-      .on("postgres_changes",{event:"INSERT",schema:"public",table:"turns"},payload=>{
-        setTurns(p=>[...p,dbToTurn(payload.new)]);
-      })
-      .on("postgres_changes",{event:"UPDATE",schema:"public",table:"turns"},payload=>{
-        setTurns(p=>p.map(t=>t.id===payload.new.id?dbToTurn(payload.new):t));
-      })
-      .on("postgres_changes",{event:"DELETE",schema:"public",table:"turns"},payload=>{
-        setTurns(p=>p.filter(t=>t.id!==payload.old.id));
-      })
+    const ch=supabase.channel("turns-rt")
+      .on("postgres_changes",{event:"INSERT",schema:"public",table:"turns"},p=>setTurns(prev=>[...prev,dbToTurn(p.new)]))
+      .on("postgres_changes",{event:"UPDATE",schema:"public",table:"turns"},p=>setTurns(prev=>prev.map(t=>t.id===p.new.id?dbToTurn(p.new):t)))
+      .on("postgres_changes",{event:"DELETE",schema:"public",table:"turns"},p=>setTurns(prev=>prev.filter(t=>t.id!==p.old.id)))
       .subscribe();
-    return ()=>supabase.removeChannel(channel);
+    return()=>supabase.removeChannel(ch);
   },[]);
 
-  // ── Suscripción en tiempo real para config ──
   useEffect(()=>{
-    const channel = supabase
-      .channel("config-realtime")
-      .on("postgres_changes",{event:"UPDATE",schema:"public",table:"config"},payload=>{
-        const row=payload.new;
+    const ch=supabase.channel("config-rt")
+      .on("postgres_changes",{event:"UPDATE",schema:"public",table:"config"},p=>{
+        const row=p.new;
         if(row.key==="plants") setPlants(row.value);
         if(row.key==="trucks") setTrucks(row.value);
-        if(row.key==="users")  setUsers(row.value);
+        if(row.key==="users")  { setUsers(row.value); if(row.passwords) setPasswords(row.passwords); }
       })
       .subscribe();
-    return ()=>supabase.removeChannel(channel);
+    return()=>supabase.removeChannel(ch);
   },[]);
 
   useEffect(()=>{ const i=setInterval(()=>setNow(Date.now()),30000); return()=>clearInterval(i); },[]);
 
-  // ── Helpers para config en Supabase ──
-  async function saveConfig(key,value) {
-    await supabase.from("config").update({value}).eq("key",key);
+  async function saveConfig(key,value,extra={}) {
+    await supabase.from("config").update({value,...extra}).eq("key",key);
   }
 
-  // ── CRUD de turnos ──
   async function handleSaveTurn(data) {
-    if (editingTurn) {
-      const updated = {...editingTurn,...data};
+    if(editingTurn) {
+      const updated={...editingTurn,...data};
       await supabase.from("turns").update(turnToDb(updated)).eq("id",editingTurn.id);
     } else {
-      const newTurn = {id:genId(),...data,createdAt:Date.now(),operator:currentUser};
-      await supabase.from("turns").insert(turnToDb(newTurn));
+      const t={id:genId(),...data,createdAt:Date.now(),operator:currentUser};
+      await supabase.from("turns").insert(turnToDb(t));
     }
     setShowForm(false); setEditingTurn(null);
   }
   async function handleAdvance(id) {
     const t=turns.find(x=>x.id===id); if(!t)return;
     const idx=STATUS_FLOW.indexOf(t.status);
-    if(idx<STATUS_FLOW.length-1){
-      await supabase.from("turns").update({status:STATUS_FLOW[idx+1]}).eq("id",id);
-    }
+    if(idx<STATUS_FLOW.length-1) await supabase.from("turns").update({status:STATUS_FLOW[idx+1]}).eq("id",id);
   }
-  async function handleCancel(id) {
-    await supabase.from("turns").update({status:"cancelado"}).eq("id",id);
-  }
-  async function handleDelete(id) {
-    await supabase.from("turns").delete().eq("id",id);
-  }
+  async function handleCancel(id) { await supabase.from("turns").update({status:"cancelado"}).eq("id",id); }
+  async function handleDelete(id) { await supabase.from("turns").delete().eq("id",id); }
 
-  // ── Config: plants / trucks / users ──
   async function renamePlant(o,n) {
-    const next=plants.map(x=>x===o?n:x);
-    setPlants(next); await saveConfig("plants",next);
-    // actualizar turnos afectados
-    const affected=turns.filter(t=>t.plant===o);
-    for(const t of affected) await supabase.from("turns").update({plant:n}).eq("id",t.id);
+    const next=plants.map(x=>x===o?n:x); setPlants(next); await saveConfig("plants",next);
+    for(const t of turns.filter(t=>t.plant===o)) await supabase.from("turns").update({plant:n}).eq("id",t.id);
   }
   async function renameTruck(o,n) {
-    const next=trucks.map(x=>x===o?n:x);
-    setTrucks(next); await saveConfig("trucks",next);
-    const affected=turns.filter(t=>(t.trucks||[]).includes(o));
-    for(const t of affected) await supabase.from("turns").update({trucks:(t.trucks||[]).map(x=>x===o?n:x)}).eq("id",t.id);
+    const next=trucks.map(x=>x===o?n:x); setTrucks(next); await saveConfig("trucks",next);
+    for(const t of turns.filter(t=>(t.trucks||[]).includes(o))) await supabase.from("turns").update({trucks:(t.trucks||[]).map(x=>x===o?n:x)}).eq("id",t.id);
   }
   async function renameUser(o,n) {
     const next=users.map(x=>x===o?n:x);
-    setUsers(next); await saveConfig("users",next);
-    const affected=turns.filter(t=>t.operator===o);
-    for(const t of affected) await supabase.from("turns").update({operator:n}).eq("id",t.id);
+    const nextPw={...passwords};
+    if(nextPw[o]!==undefined){ nextPw[n]=nextPw[o]; delete nextPw[o]; }
+    setUsers(next); setPasswords(nextPw);
+    await saveConfig("users",next,{passwords:nextPw});
+    for(const t of turns.filter(t=>t.operator===o)) await supabase.from("turns").update({operator:n}).eq("id",t.id);
     if(currentUser===o) setCurrentUser(n);
   }
   async function addPlant(v) { if(plants.includes(v))return; const next=[...plants,v]; setPlants(next); await saveConfig("plants",next); }
   async function addTruck(v) { if(trucks.includes(v))return; const next=[...trucks,v]; setTrucks(next); await saveConfig("trucks",next); }
-  async function addUser(v)  { if(users.includes(v))return;  const next=[...users,v];  setUsers(next);  await saveConfig("users",next); }
+  async function addUser(v)  { if(users.includes(v))return; const next=[...users,v]; setUsers(next); await saveConfig("users",next,{passwords}); }
   async function removePlant(v) { const next=plants.filter(x=>x!==v); setPlants(next); await saveConfig("plants",next); await supabase.from("turns").delete().eq("plant",v); }
   async function removeTruck(v) { const next=trucks.filter(x=>x!==v); setTrucks(next); await saveConfig("trucks",next); }
-  async function removeUser(v)  { const next=users.filter(x=>x!==v);  setUsers(next);  await saveConfig("users",next); }
+  async function removeUser(v) {
+    const next=users.filter(x=>x!==v); const nextPw={...passwords}; delete nextPw[v];
+    setUsers(next); setPasswords(nextPw); await saveConfig("users",next,{passwords:nextPw});
+  }
+  async function setPassword(user,pw) {
+    const nextPw={...passwords,[user]:pw};
+    setPasswords(nextPw);
+    await saveConfig("users",users,{passwords:nextPw});
+  }
 
-  // ── Stats del dashboard filtradas por día ──
-  const dashDayTurns = turns.filter(t=>dayKey(t.scheduledAt)===dashDay);
-  const stats = {
-    total:     dashDayTurns.length,
-    active:    dashDayTurns.filter(t=>!["completado","cancelado"].includes(t.status)).length,
-    completed: dashDayTurns.filter(t=>t.status==="completado").length,
-    m3Today:   dashDayTurns.filter(t=>t.status==="completado").reduce((s,t)=>s+t.m3,0),
+  function handleLogin(user,pw) {
+    const stored=passwords[user];
+    if(!stored) { setCurrentUser(user); return true; }
+    if(stored===pw) { setCurrentUser(user); return true; }
+    return false;
+  }
+
+  const dashDayTurns=turns.filter(t=>dayKey(t.scheduledAt)===dashDay);
+  const stats={
+    total:dashDayTurns.length,
+    active:dashDayTurns.filter(t=>!["completado","cancelado"].includes(t.status)).length,
+    completed:dashDayTurns.filter(t=>t.status==="completado").length,
+    m3Today:dashDayTurns.filter(t=>t.status==="completado").reduce((s,t)=>s+t.m3,0),
   };
-
-  const filteredTurns = turns.filter(t=>{
-    if(filterStatus!=="all" && t.status!==filterStatus) return false;
-    if(filterPlant!=="all"  && t.plant!==filterPlant)   return false;
-    if(filterTruck!=="all"  && !(t.trucks||[]).includes(filterTruck)) return false;
+  const filteredTurns=turns.filter(t=>{
+    if(filterStatus!=="all"&&t.status!==filterStatus) return false;
+    if(filterPlant!=="all"&&t.plant!==filterPlant) return false;
+    if(filterTruck!=="all"&&!(t.trucks||[]).includes(filterTruck)) return false;
     return true;
   });
 
-  if (loading) return (
+  if(loading) return(
     <div style={{...S.loginBg,flexDirection:"column",gap:16}}>
       <div style={{fontSize:48,color:C.accent}}>⬡</div>
       <div style={{fontSize:18,color:C.text,fontWeight:700}}>Cargando HormiTurn…</div>
@@ -218,9 +187,9 @@ export default function App() {
     </div>
   );
 
-  if (!currentUser) return <LoginScreen users={users} onLogin={setCurrentUser}/>;
+  if(!currentUser) return <LoginScreen users={users} passwords={passwords} onLogin={handleLogin}/>;
 
-  return (
+  return(
     <div style={S.app}>
       <aside style={S.sidebar}>
         <div style={S.sidebarLogo}>
@@ -241,7 +210,6 @@ export default function App() {
           <button onClick={()=>setCurrentUser(null)} style={S.logoutBtn}>← Salir</button>
         </div>
       </aside>
-
       <main style={S.main}>
         <header style={S.header}>
           <div>
@@ -253,43 +221,57 @@ export default function App() {
           )}
         </header>
         <div style={S.content}>
-          {view==="dashboard" && <DashboardView stats={stats} turns={dashDayTurns} allTurns={turns} trucks={trucks} onAdvance={handleAdvance} dashDay={dashDay} setDashDay={setDashDay}/>}
-          {view==="turns"     && <TurnsView turns={filteredTurns} filterStatus={filterStatus} setFilterStatus={setFilterStatus} filterPlant={filterPlant} setFilterPlant={setFilterPlant} filterTruck={filterTruck} setFilterTruck={setFilterTruck} plants={plants} trucks={trucks} onAdvance={handleAdvance} onEdit={t=>{setEditingTurn(t);setShowForm(true);}} onCancel={handleCancel} onDelete={handleDelete}/>}
-          {view==="calendar"  && <CalendarView turns={turns} selectedDay={calendarDay} setSelectedDay={setCalendarDay} onAdvance={handleAdvance} onEdit={t=>{setEditingTurn(t);setShowForm(true);}} onCancel={handleCancel}/>}
-          {view==="trucks"    && <TrucksView turns={turns} trucks={trucks}/>}
-          {view==="plants"    && <PlantsView turns={turns} plants={plants} trucks={trucks}/>}
+          {view==="dashboard"&&<DashboardView stats={stats} turns={dashDayTurns} allTurns={turns} trucks={trucks} onAdvance={handleAdvance} dashDay={dashDay} setDashDay={setDashDay}/>}
+          {view==="turns"    &&<TurnsView turns={filteredTurns} filterStatus={filterStatus} setFilterStatus={setFilterStatus} filterPlant={filterPlant} setFilterPlant={setFilterPlant} filterTruck={filterTruck} setFilterTruck={setFilterTruck} plants={plants} trucks={trucks} onAdvance={handleAdvance} onEdit={t=>{setEditingTurn(t);setShowForm(true);}} onCancel={handleCancel} onDelete={handleDelete}/>}
+          {view==="calendar" &&<CalendarView turns={turns} selectedDay={calendarDay} setSelectedDay={setCalendarDay} onAdvance={handleAdvance} onEdit={t=>{setEditingTurn(t);setShowForm(true);}} onCancel={handleCancel}/>}
+          {view==="trucks"   &&<TrucksView turns={turns} trucks={trucks}/>}
+          {view==="plants"   &&<PlantsView turns={turns} plants={plants} trucks={trucks}/>}
         </div>
       </main>
-
       {showForm&&<TurnForm initial={editingTurn} plants={plants} trucks={trucks} users={users} allTurns={turns} currentUser={currentUser} onSave={handleSaveTurn} onClose={()=>{setShowForm(false);setEditingTurn(null);}}/>}
-      {showSettings&&<SettingsModal plants={plants} trucks={trucks} users={users} onRenamePlant={renamePlant} onRenameTruck={renameTruck} onRenameUser={renameUser} onAddPlant={addPlant} onAddTruck={addTruck} onAddUser={addUser} onRemovePlant={removePlant} onRemoveTruck={removeTruck} onRemoveUser={removeUser} onClose={()=>setShowSettings(false)}/>}
+      {showSettings&&<SettingsModal plants={plants} trucks={trucks} users={users} passwords={passwords} onRenamePlant={renamePlant} onRenameTruck={renameTruck} onRenameUser={renameUser} onAddPlant={addPlant} onAddTruck={addTruck} onAddUser={addUser} onRemovePlant={removePlant} onRemoveTruck={removeTruck} onRemoveUser={removeUser} onSetPassword={setPassword} onClose={()=>setShowSettings(false)}/>}
     </div>
   );
 }
 
-// ─── LOGIN ────────────────────────────────────────────────────────────────────
-function LoginScreen({users,onLogin}) {
+function LoginScreen({users,passwords,onLogin}) {
   const [sel,setSel]=useState(null);
-  return (
+  const [pw,setPw]=useState("");
+  const [error,setError]=useState(false);
+  function handleLogin() { const ok=onLogin(sel,pw); if(!ok){setError(true);setPw("");} }
+  const needsPw=sel&&passwords[sel];
+  return(
     <div style={S.loginBg}>
       <div style={S.loginCard}>
         <div style={S.loginLogo}>⬡</div>
         <h1 style={S.loginTitle}>HormiTurn</h1>
         <p style={S.loginSub}>Sistema de Gestión de Despacho de Hormigón</p>
         <p style={S.loginLabel}>Seleccione su usuario</p>
-        <div style={S.loginUsers}>{users.map(u=><button key={u} onClick={()=>setSel(u)} style={{...S.loginUser,...(sel===u?S.loginUserActive:{})}}><div style={S.loginUserAvatar}>{u[0]}</div><span>{u}</span></button>)}</div>
-        <button disabled={!sel} onClick={()=>onLogin(sel)} style={{...S.btnPrimary,width:"100%",opacity:sel?1:.4,marginTop:8}}>Ingresar →</button>
+        <div style={S.loginUsers}>
+          {users.map(u=>(
+            <button key={u} onClick={()=>{setSel(u);setPw("");setError(false);}} style={{...S.loginUser,...(sel===u?S.loginUserActive:{})}}>
+              <div style={S.loginUserAvatar}>{u[0]}</div><span>{u}</span>
+              {passwords[u]&&<span style={{marginLeft:"auto",fontSize:10,color:"#6B7280"}}>🔒</span>}
+            </button>
+          ))}
+        </div>
+        {needsPw&&(
+          <div style={{marginBottom:16}}>
+            <input type="password" value={pw} onChange={e=>{setPw(e.target.value);setError(false);}} placeholder="Contraseña" style={{...S.input,width:"100%",boxSizing:"border-box",textAlign:"center"}} onKeyDown={e=>e.key==="Enter"&&sel&&handleLogin()} autoFocus/>
+            {error&&<div style={{color:"#EF4444",fontSize:12,marginTop:6,textAlign:"center"}}>Contraseña incorrecta</div>}
+          </div>
+        )}
+        <button disabled={!sel} onClick={handleLogin} style={{...S.btnPrimary,width:"100%",opacity:sel?1:.4,marginTop:4}}>Ingresar →</button>
       </div>
     </div>
   );
 }
 
-// ─── SETTINGS ────────────────────────────────────────────────────────────────
 function EditableList({items,onRename,onAdd,onRemove,label,placeholder}) {
   const [editing,setEditing]=useState(null);
   const [newVal,setNewVal]=useState("");
   const [adding,setAdding]=useState(false);
-  return (
+  return(
     <div style={{marginBottom:24}}>
       <div style={{...S.panelTitle,marginBottom:10}}>{label}</div>
       {items.map((item,i)=>(
@@ -307,21 +289,51 @@ function EditableList({items,onRename,onAdd,onRemove,label,placeholder}) {
     </div>
   );
 }
-function SettingsModal({plants,trucks,users,onRenamePlant,onRenameTruck,onRenameUser,onAddPlant,onAddTruck,onAddUser,onRemovePlant,onRemoveTruck,onRemoveUser,onClose}) {
+
+function PasswordList({users,passwords,onSetPassword}) {
+  const [editing,setEditing]=useState(null);
+  const [val,setVal]=useState("");
+  return(
+    <div>
+      <div style={{...S.panelTitle,marginBottom:10}}>Contraseñas</div>
+      <p style={{fontSize:12,color:C.muted,marginBottom:14}}>Si un operador no tiene contraseña asignada, puede ingresar sin contraseña.</p>
+      {users.map((u,i)=>(
+        <div key={i} style={S.settingsRow}>
+          <div style={S.userAvatar}>{u[0]}</div>
+          <span style={{flex:1,fontSize:14}}>{u}</span>
+          {editing===u
+            ?<><input type="password" value={val} onChange={e=>setVal(e.target.value)} placeholder="Nueva contraseña" style={{...S.input,width:160,padding:"5px 10px",fontSize:13}} autoFocus onKeyDown={e=>{if(e.key==="Enter"){onSetPassword(u,val);setEditing(null);setVal("");}if(e.key==="Escape"){setEditing(null);setVal("");}}}/>
+              <button onClick={()=>{onSetPassword(u,val);setEditing(null);setVal("");}} style={S.btnSave}>✓</button>
+              <button onClick={()=>{setEditing(null);setVal("");}} style={S.btnCancelSm}>✕</button>
+            </>
+            :<>
+              <span style={{fontSize:12,color:passwords[u]?"#10B981":C.muted,marginRight:8}}>{passwords[u]?"🔒 Protegido":"Sin contraseña"}</span>
+              <button onClick={()=>{setEditing(u);setVal("");}} style={S.btnEdit}>{passwords[u]?"Cambiar":"Asignar"}</button>
+              {passwords[u]&&<button onClick={()=>onSetPassword(u,"")} style={S.btnDangerSm}>✕</button>}
+            </>
+          }
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function SettingsModal({plants,trucks,users,passwords,onRenamePlant,onRenameTruck,onRenameUser,onAddPlant,onAddTruck,onAddUser,onRemovePlant,onRemoveTruck,onRemoveUser,onSetPassword,onClose}) {
   const [tab,setTab]=useState("plants");
-  return (
+  return(
     <div style={S.modalOverlay}>
-      <div style={{...S.modal,maxWidth:520}}>
+      <div style={{...S.modal,maxWidth:540}}>
         <div style={S.modalHeader}><h2 style={S.modalTitle}>⚙ Configuración</h2><button onClick={onClose} style={S.modalClose}>✕</button></div>
-        <div style={{display:"flex",gap:4,padding:"14px 24px 0",borderBottom:`1px solid ${C.border}`}}>
-          {[["plants","🏭 Plantas"],["trucks","🚛 Camiones"],["users","👤 Operadores"]].map(([k,l])=>(
+        <div style={{display:"flex",gap:4,padding:"14px 24px 0",borderBottom:`1px solid ${C.border}`,flexWrap:"wrap"}}>
+          {[["plants","🏭 Plantas"],["trucks","🚛 Camiones"],["users","👤 Operadores"],["passwords","🔒 Contraseñas"]].map(([k,l])=>(
             <button key={k} onClick={()=>setTab(k)} style={{...S.tabBtn,...(tab===k?S.tabBtnActive:{})}}>{l}</button>
           ))}
         </div>
-        <div style={{padding:24}}>
-          {tab==="plants"&&<EditableList items={plants} onRename={onRenamePlant} onAdd={onAddPlant} onRemove={onRemovePlant} label="Plantas" placeholder="Nueva planta…"/>}
-          {tab==="trucks"&&<EditableList items={trucks} onRename={onRenameTruck} onAdd={onAddTruck} onRemove={onRemoveTruck} label="Camiones" placeholder="Nuevo camión…"/>}
-          {tab==="users" &&<EditableList items={users}  onRename={onRenameUser}  onAdd={onAddUser}  onRemove={onRemoveUser}  label="Operadores" placeholder="Nuevo operador…"/>}
+        <div style={{padding:24,maxHeight:"60vh",overflowY:"auto"}}>
+          {tab==="plants"    &&<EditableList items={plants} onRename={onRenamePlant} onAdd={onAddPlant} onRemove={onRemovePlant} label="Plantas" placeholder="Nueva planta…"/>}
+          {tab==="trucks"    &&<EditableList items={trucks} onRename={onRenameTruck} onAdd={onAddTruck} onRemove={onRemoveTruck} label="Camiones" placeholder="Nuevo camión…"/>}
+          {tab==="users"     &&<EditableList items={users}  onRename={onRenameUser}  onAdd={onAddUser}  onRemove={onRemoveUser}  label="Operadores" placeholder="Nuevo operador…"/>}
+          {tab==="passwords" &&<PasswordList users={users} passwords={passwords} onSetPassword={onSetPassword}/>}
           <p style={{fontSize:12,color:C.muted,marginTop:4}}>Los cambios se sincronizan para todos los usuarios.</p>
         </div>
         <div style={S.modalFooter}><button onClick={onClose} style={S.btnPrimary}>Listo</button></div>
@@ -330,14 +342,13 @@ function SettingsModal({plants,trucks,users,onRenamePlant,onRenameTruck,onRename
   );
 }
 
-// ─── DASHBOARD ────────────────────────────────────────────────────────────────
 function DashboardView({stats,turns,allTurns,trucks,onAdvance,dashDay,setDashDay}) {
   const today=dayKey(Date.now());
   const refDate=new Date(); refDate.setHours(0,0,0,0);
   const weekDays=Array.from({length:15},(_,i)=>{ const d=new Date(refDate); d.setDate(d.getDate()+i-7); return dayKey(d.getTime()); });
   const hasAct=k=>allTurns.some(t=>dayKey(t.scheduledAt)===k);
   const active=turns.filter(t=>!["completado","cancelado"].includes(t.status));
-  return (
+  return(
     <div>
       <div style={{...S.panel,marginBottom:20,padding:"14px 16px"}}>
         <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:10}}>
@@ -373,9 +384,8 @@ function DashboardView({stats,turns,allTurns,trucks,onAdvance,dashDay,setDashDay
   );
 }
 
-// ─── TURNS VIEW ───────────────────────────────────────────────────────────────
 function TurnsView({turns,filterStatus,setFilterStatus,filterPlant,setFilterPlant,filterTruck,setFilterTruck,plants,trucks,onAdvance,onEdit,onCancel,onDelete}) {
-  return (
+  return(
     <div>
       <div style={S.filters}>
         <select value={filterStatus} onChange={e=>setFilterStatus(e.target.value)} style={S.select}><option value="all">Todos los estados</option>{Object.entries(STATUS_CONFIG).map(([k,v])=><option key={k} value={k}>{v.label}</option>)}</select>
@@ -388,17 +398,17 @@ function TurnsView({turns,filterStatus,setFilterStatus,filterPlant,setFilterPlan
   );
 }
 
-// ─── TURN CARD ────────────────────────────────────────────────────────────────
 function TurnCard({turn:t,onAdvance,onEdit,onCancel,onDelete,compact}) {
   const cfg=STATUS_CONFIG[t.status];
   const canAdv=STATUS_FLOW.includes(t.status)&&t.status!=="completado";
   const truckList=(t.trucks||[]).join(", ");
-  return (
+  const timeRange=t.endAt?`${fmtTime(t.scheduledAt)} → ${fmtTime(t.endAt)}`:`${fmtTime(t.scheduledAt)}`;
+  return(
     <div style={S.turnCard}>
       <div style={S.turnCardTop}>
         <div style={{display:"flex",alignItems:"center",gap:10}}>
           <div style={{...S.statusDot,background:cfg.dot}}/>
-          <div><div style={S.turnClient}>{t.client}</div><div style={S.turnMeta}>{t.plant} · {truckList} · {t.m3}m³ · {fmtTime(t.scheduledAt)}</div></div>
+          <div><div style={S.turnClient}>{t.client}</div><div style={S.turnMeta}>{t.plant} · {truckList} · {t.m3}m³ · {timeRange}</div></div>
         </div>
         <div style={{...S.badge,background:cfg.bg,color:cfg.color}}>{cfg.label}</div>
       </div>
@@ -414,7 +424,6 @@ function TurnCard({turn:t,onAdvance,onEdit,onCancel,onDelete,compact}) {
   );
 }
 
-// ─── CALENDAR VIEW ────────────────────────────────────────────────────────────
 function CalendarView({turns,selectedDay,setSelectedDay,onAdvance,onEdit,onCancel}) {
   const today=dayKey(Date.now());
   const refDate=new Date(); refDate.setHours(0,0,0,0);
@@ -425,11 +434,17 @@ function CalendarView({turns,selectedDay,setSelectedDay,onAdvance,onEdit,onCance
   const nowD=new Date(); const nowFrac=(nowD.getHours()+nowD.getMinutes()/60-START_H)/totalH;
   const showNow=selectedDay===today&&nowFrac>=0&&nowFrac<=1;
   function assignCols(turns) {
-    const cols=[]; const assigned=turns.map(t=>{ const s=new Date(t.scheduledAt); const sm=s.getHours()*60+s.getMinutes(); const em=sm+Math.max(60,t.m3*10); let col=0; while(cols[col]&&cols[col]>sm)col++; cols[col]=em; return {...t,col,startMin:sm,endMin:em}; });
+    const cols=[]; const assigned=turns.map(t=>{
+      const s=new Date(t.scheduledAt); const sm=s.getHours()*60+s.getMinutes();
+      const endTs=t.endAt||t.scheduledAt+3600000;
+      const e=new Date(endTs); const em=e.getHours()*60+e.getMinutes();
+      let col=0; while(cols[col]&&cols[col]>sm)col++;
+      cols[col]=em; return {...t,col,startMin:sm,endMin:em};
+    });
     return {assigned,totalCols:Math.max(0,...assigned.map(t=>t.col))+1};
   }
   const {assigned,totalCols}=assignCols(dayTurns);
-  return (
+  return(
     <div style={{display:"flex",flexDirection:"column",gap:16,height:"100%"}}>
       <div style={S.calDayStrip}>
         {weekDays.map(k=>{ const d=parseDay(k); const isSel=k===selectedDay; const isToday=k===today; const hasAct=turns.some(t=>dayKey(t.scheduledAt)===k);
@@ -444,7 +459,8 @@ function CalendarView({turns,selectedDay,setSelectedDay,onAdvance,onEdit,onCance
           <h2 style={{...S.panelTitle,margin:0}}>{parseDay(selectedDay).toLocaleDateString("es-AR",{weekday:"long",day:"2-digit",month:"long",year:"numeric"})}</h2>
           <span style={{fontSize:13,color:C.muted}}>{dayTurns.length} turno{dayTurns.length!==1?"s":""}</span>
         </div>
-        {dayTurns.length===0?<div style={{...S.empty,flex:1,display:"flex",alignItems:"center",justifyContent:"center"}}>Sin turnos para este día</div>
+        {dayTurns.length===0
+          ?<div style={{...S.empty,flex:1,display:"flex",alignItems:"center",justifyContent:"center"}}>Sin turnos para este día</div>
           :<div style={{flex:1,overflowY:"auto",position:"relative"}}>
             <div style={{display:"flex",position:"relative",minHeight:totalH*HOUR_H}}>
               <div style={{width:46,flexShrink:0,position:"relative"}}>
@@ -456,7 +472,7 @@ function CalendarView({turns,selectedDay,setSelectedDay,onAdvance,onEdit,onCance
                 {showNow&&<div style={{position:"absolute",top:nowFrac*totalH*HOUR_H,left:0,right:0,borderTop:"2px solid #EF4444",zIndex:10,pointerEvents:"none"}}><div style={{position:"absolute",left:-4,top:-5,width:8,height:8,borderRadius:"50%",background:"#EF4444"}}/></div>}
                 {assigned.map(t=>{ const cfg=STATUS_CONFIG[t.status]; const topPx=(t.startMin/60-START_H)*HOUR_H; const hPx=Math.max(36,(t.endMin-t.startMin)/60*HOUR_H-4); const cW=100/totalCols; const canAdv=STATUS_FLOW.includes(t.status)&&t.status!=="completado";
                   return <div key={t.id} style={{position:"absolute",top:topPx+2,height:hPx,left:`calc(${t.col*cW}% + 2px)`,width:`calc(${cW}% - 4px)`,background:cfg.bg,border:`1.5px solid ${cfg.color}55`,borderLeft:`4px solid ${cfg.color}`,borderRadius:8,padding:"6px 8px",overflow:"hidden",cursor:"pointer",boxSizing:"border-box",zIndex:2}}>
-                    <div style={{fontSize:11,fontWeight:800,color:cfg.color}}>{fmtTime(t.scheduledAt)}</div>
+                    <div style={{fontSize:11,fontWeight:800,color:cfg.color}}>{fmtTime(t.scheduledAt)}{t.endAt&&` → ${fmtTime(t.endAt)}`}</div>
                     <div style={{fontSize:12,fontWeight:700,color:"#1a1a2e",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{t.client}</div>
                     <div style={{fontSize:10,color:"#555",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{(t.trucks||[]).join(", ")} · {t.m3}m³</div>
                     {hPx>90&&<div style={{display:"flex",gap:4,marginTop:6,flexWrap:"wrap"}}>
@@ -476,14 +492,14 @@ function CalendarView({turns,selectedDay,setSelectedDay,onAdvance,onEdit,onCance
   );
 }
 
-// ─── TRUCKS & PLANTS ─────────────────────────────────────────────────────────
 function TrucksView({turns,trucks}) {
   return <div style={S.truckGrid}>{trucks.map(tr=>{ const hist=turns.filter(t=>(t.trucks||[]).includes(tr)); const act=hist.find(t=>!["completado","cancelado"].includes(t.status)); const comp=hist.filter(t=>t.status==="completado"); const cfg=act?STATUS_CONFIG[act.status]:{label:"Libre",color:"#10B981",bg:"#D1FAE5"};
     return <div key={tr} style={S.truckCard}><div style={S.truckCardHeader}><span style={{fontSize:28}}>🚛</span><div><div style={S.truckCardName}>{tr}</div><div style={{...S.badge,background:cfg.bg,color:cfg.color}}>{cfg.label}</div></div></div>
-      {act&&<div style={S.truckActive}><div style={S.truckActiveLabel}>Turno activo:</div><div style={S.truckActiveClient}>{act.client}</div><div style={S.truckActiveMeta}>{act.plant} · {act.m3}m³</div></div>}
+      {act&&<div style={S.truckActive}><div style={S.truckActiveLabel}>Turno activo:</div><div style={S.truckActiveClient}>{act.client}</div><div style={S.truckActiveMeta}>{act.plant} · {act.m3}m³ · {fmtTime(act.scheduledAt)}{act.endAt&&` → ${fmtTime(act.endAt)}`}</div></div>}
       <div style={S.truckStats}><div style={S.truckStat}><span style={S.truckStatNum}>{comp.length}</span>Completados</div><div style={S.truckStat}><span style={S.truckStatNum}>{comp.reduce((s,t)=>s+t.m3,0)}</span>m³</div></div>
     </div>; })}</div>;
 }
+
 function PlantsView({turns,plants,trucks}) {
   return <div style={{display:"flex",gap:20,flexWrap:"wrap"}}>{plants.map(plant=>{ const pt=turns.filter(t=>t.plant===plant); const act=pt.filter(t=>!["completado","cancelado"].includes(t.status)); const comp=pt.filter(t=>t.status==="completado");
     return <div key={plant} style={S.plantCard}><div style={S.plantHeader}><span style={{fontSize:32}}>🏭</span><div><div style={S.plantName}>{plant}</div><div style={S.plantStatus}>{act.length>0?`${act.length} turno(s) activo(s)`:"Sin actividad activa"}</div></div></div>
@@ -495,13 +511,14 @@ function PlantsView({turns,plants,trucks}) {
     </div>; })}</div>;
 }
 
-// ─── TURN FORM ────────────────────────────────────────────────────────────────
 function TurnForm({initial,plants,trucks,users,allTurns,currentUser,onSave,onClose}) {
+  const defaultEnd=initial?.endAt||(initial?.scheduledAt?initial.scheduledAt+3600000:Date.now()+3600000);
   const [form,setForm]=useState({
-    client:initial?.client||"",plant:initial?.plant||plants[0]||"",
+    client:initial?.client||"", plant:initial?.plant||plants[0]||"",
     trucks:initial?.trucks||(initial?.truck?[initial.truck]:[trucks[0]||""]),
-    m3:initial?.m3||6,destination:initial?.destination||"",notes:initial?.notes||"",
-    status:initial?.status||"pendiente",scheduledAt:initial?.scheduledAt||Date.now(),
+    m3:initial?.m3||6, destination:initial?.destination||"",
+    notes:initial?.notes||"", status:initial?.status||"pendiente",
+    scheduledAt:initial?.scheduledAt||Date.now(), endAt:defaultEnd,
   });
   const [conflicts,setConflicts]=useState([]);
   const set=(k,v)=>setForm(p=>({...p,[k]:v}));
@@ -509,11 +526,13 @@ function TurnForm({initial,plants,trucks,users,allTurns,currentUser,onSave,onClo
   function toggleTruck(tr){ set("trucks",form.trucks.includes(tr)?form.trucks.filter(x=>x!==tr):[...form.trucks,tr]); }
   useEffect(()=>{
     const found=[];
-    form.trucks.forEach(tr=>{ const c=truckConflicts(allTurns,tr,form.scheduledAt,form.m3,initial?.id||null); c.forEach(cf=>{if(!found.find(f=>f.id===cf.id))found.push({...cf,conflictTruck:tr});}); });
+    form.trucks.forEach(tr=>{ const c=truckConflicts(allTurns,tr,form.scheduledAt,form.endAt,initial?.id||null); c.forEach(cf=>{if(!found.find(f=>f.id===cf.id))found.push({...cf,conflictTruck:tr});}); });
     setConflicts(found);
-  },[form.trucks,form.scheduledAt,form.m3]);
-  const canSave=form.client&&form.destination&&form.trucks.length>0&&conflicts.length===0;
-  return (
+  },[form.trucks,form.scheduledAt,form.endAt]);
+  function toLocalDT(ts){ return new Date(ts-new Date().getTimezoneOffset()*60000).toISOString().slice(0,16); }
+  function fromLocalDT(s){ return new Date(s).getTime(); }
+  const canSave=form.client&&form.destination&&form.trucks.length>0&&conflicts.length===0&&form.endAt>form.scheduledAt;
+  return(
     <div style={S.modalOverlay}>
       <div style={{...S.modal,maxWidth:600}}>
         <div style={S.modalHeader}><h2 style={S.modalTitle}>{initial?"Editar Turno":"Nuevo Turno"}</h2><button onClick={onClose} style={S.modalClose}>✕</button></div>
@@ -521,8 +540,13 @@ function TurnForm({initial,plants,trucks,users,allTurns,currentUser,onSave,onClo
           <div style={S.formGroup}><label style={S.label}>Cliente *</label><input value={form.client} onChange={e=>set("client",e.target.value)} style={S.input} placeholder="Nombre del cliente"/></div>
           <div style={S.formGroup}><label style={S.label}>Destino *</label><input value={form.destination} onChange={e=>set("destination",e.target.value)} style={S.input} placeholder="Dirección de entrega"/></div>
           <div style={S.formGroup}><label style={S.label}>Planta</label><select value={form.plant} onChange={e=>set("plant",e.target.value)} style={S.input}>{plants.map(p=><option key={p}>{p}</option>)}</select></div>
-          <div style={S.formGroup}><label style={S.label}>Fecha y hora</label><input type="datetime-local" value={new Date(form.scheduledAt-new Date().getTimezoneOffset()*60000).toISOString().slice(0,16)} onChange={e=>set("scheduledAt",new Date(e.target.value).getTime())} style={S.input}/></div>
-          <div style={{...S.formGroup,gridColumn:"1/-1"}}><label style={S.label}>Volumen total (m³) — {TRUCK_CAPACITY}m³/camión → necesita {neededTrucks} camión{neededTrucks!==1?"es":""}</label><input type="number" min="1" max="100" value={form.m3} onChange={e=>set("m3",Number(e.target.value))} style={{...S.input,maxWidth:120}}/></div>
+          <div style={S.formGroup}>{initial&&<><label style={S.label}>Estado</label><select value={form.status} onChange={e=>set("status",e.target.value)} style={S.input}>{Object.entries(STATUS_CONFIG).map(([k,v])=><option key={k} value={k}>{v.label}</option>)}</select></>}</div>
+          <div style={S.formGroup}><label style={S.label}>Inicio</label><input type="datetime-local" value={toLocalDT(form.scheduledAt)} onChange={e=>set("scheduledAt",fromLocalDT(e.target.value))} style={S.input}/></div>
+          <div style={S.formGroup}>
+            <label style={S.label}>Finalización {form.endAt<=form.scheduledAt&&<span style={{color:"#EF4444"}}>⚠ debe ser posterior</span>}</label>
+            <input type="datetime-local" value={toLocalDT(form.endAt)} onChange={e=>set("endAt",fromLocalDT(e.target.value))} style={{...S.input,...(form.endAt<=form.scheduledAt?{borderColor:"#EF4444"}:{})}}/>
+          </div>
+          <div style={{...S.formGroup,gridColumn:"1/-1"}}><label style={S.label}>Volumen (m³) — {TRUCK_CAPACITY}m³/camión → necesita {neededTrucks} camión{neededTrucks!==1?"es":""}</label><input type="number" min="1" max="100" value={form.m3} onChange={e=>set("m3",Number(e.target.value))} style={{...S.input,maxWidth:120}}/></div>
           <div style={{...S.formGroup,gridColumn:"1/-1"}}>
             <label style={S.label}>Camiones ({form.trucks.length} seleccionado{form.trucks.length!==1?"s":""} · cap: {form.trucks.length*TRUCK_CAPACITY}m³){form.trucks.length<neededTrucks&&<span style={{color:"#F59E0B",marginLeft:8}}>⚠ Faltan {neededTrucks-form.trucks.length}</span>}</label>
             <div style={{display:"flex",flexWrap:"wrap",gap:8,marginTop:4}}>
@@ -530,8 +554,7 @@ function TurnForm({initial,plants,trucks,users,allTurns,currentUser,onSave,onClo
                 return <button key={tr} onClick={()=>toggleTruck(tr)} style={{padding:"8px 14px",borderRadius:8,border:`2px solid ${hasConfl?"#EF4444":sel?"#4F8EF7":C.border}`,background:hasConfl?"#FEE2E2":sel?`${C.accent}22`:C.bg,color:hasConfl?"#EF4444":sel?C.accent:C.muted,fontWeight:sel?700:400,cursor:"pointer",fontSize:13,display:"flex",alignItems:"center",gap:6}}>🚛 {tr} {hasConfl&&"⚠"}</button>; })}
             </div>
           </div>
-          {conflicts.length>0&&<div style={{...S.formGroup,gridColumn:"1/-1"}}><div style={{background:"#FEE2E2",border:"1px solid #EF444455",borderRadius:8,padding:12}}><div style={{fontWeight:700,color:"#EF4444",marginBottom:6}}>⚠ Conflicto de horario</div>{conflicts.map(c=><div key={c.id} style={{fontSize:13,color:"#7f1d1d",marginBottom:4}}>{c.conflictTruck}: <strong>{c.client}</strong> ({fmtTime(c.scheduledAt)} — {fmtTime(c.scheduledAt+estDuration(c.m3))})</div>)}<div style={{fontSize:12,color:"#7f1d1d",marginTop:6}}>Cambiá el horario o seleccioná otros camiones.</div></div></div>}
-          {initial&&<div style={S.formGroup}><label style={S.label}>Estado</label><select value={form.status} onChange={e=>set("status",e.target.value)} style={S.input}>{Object.entries(STATUS_CONFIG).map(([k,v])=><option key={k} value={k}>{v.label}</option>)}</select></div>}
+          {conflicts.length>0&&<div style={{...S.formGroup,gridColumn:"1/-1"}}><div style={{background:"#FEE2E2",border:"1px solid #EF444455",borderRadius:8,padding:12}}><div style={{fontWeight:700,color:"#EF4444",marginBottom:6}}>⚠ Conflicto de horario</div>{conflicts.map(c=><div key={c.id} style={{fontSize:13,color:"#7f1d1d",marginBottom:4}}>{c.conflictTruck}: <strong>{c.client}</strong> ({fmtTime(c.scheduledAt)}{c.endAt?` → ${fmtTime(c.endAt)}`:""})</div>)}<div style={{fontSize:12,color:"#7f1d1d",marginTop:6}}>Cambiá el horario o seleccioná otros camiones.</div></div></div>}
           <div style={{...S.formGroup,gridColumn:"1/-1"}}><label style={S.label}>Notas</label><textarea value={form.notes} onChange={e=>set("notes",e.target.value)} style={{...S.input,minHeight:52,resize:"vertical"}} placeholder="Observaciones…"/></div>
         </div>
         <div style={S.modalFooter}><button onClick={onClose} style={S.btnSecondary}>Cancelar</button><button onClick={()=>{if(canSave)onSave(form);}} style={{...S.btnPrimary,opacity:canSave?1:.45,cursor:canSave?"pointer":"not-allowed"}}>{initial?"Guardar":"Crear turno"}</button></div>
@@ -540,7 +563,6 @@ function TurnForm({initial,plants,trucks,users,allTurns,currentUser,onSave,onClo
   );
 }
 
-// ─── STYLES ───────────────────────────────────────────────────────────────────
 const C={bg:"#0F1117",sidebar:"#161820",panel:"#1C1F2E",border:"#2A2D3E",text:"#E8EAF0",muted:"#6B7280",accent:"#4F8EF7"};
 const S={
   app:{display:"flex",height:"100vh",background:C.bg,fontFamily:"'IBM Plex Sans','Segoe UI',sans-serif",color:C.text,overflow:"hidden"},
