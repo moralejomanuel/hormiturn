@@ -15,45 +15,120 @@ const STATUS_FLOW = ["pendiente","en_planta","en_ruta","descargando","completado
 function genId() { return Date.now().toString(36)+Math.random().toString(36).slice(2,6); }
 function fmtTime(ts) { return new Date(ts).toLocaleTimeString("es-AR",{hour:"2-digit",minute:"2-digit"}); }
 function fmtDate(ts) { return new Date(ts).toLocaleDateString("es-AR",{day:"2-digit",month:"2-digit",year:"numeric"}); }
+function fmtDateLong(ts) { return new Date(ts).toLocaleDateString("es-AR",{weekday:"long",day:"2-digit",month:"long",year:"numeric"}); }
 function dayKey(ts) { const d=new Date(ts); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`; }
 function parseDay(k) { const [y,m,d]=k.split("-").map(Number); return new Date(y,m-1,d); }
 function overlaps(s1,e1,s2,e2) { return s1<e2&&e1>s2; }
 function truckConflicts(turns,truck,scheduledAt,endAt,editId=null) {
   return turns.filter(t=>
-    t.id!==editId &&
-    !["cancelado"].includes(t.status) &&
-    Array.isArray(t.trucks) && t.trucks.includes(truck) &&
+    t.id!==editId&&!["cancelado"].includes(t.status)&&
+    Array.isArray(t.trucks)&&t.trucks.includes(truck)&&
     overlaps(scheduledAt,endAt,t.scheduledAt,t.endAt||t.scheduledAt+3600000)
   );
 }
-
 function dbToTurn(row) {
   return {
-    id:row.id, client:row.client, plant:row.plant, trucks:row.trucks,
-    m3:row.m3, status:row.status, operator:row.operator,
-    destination:row.destination, notes:row.notes||"",
-    scheduledAt:row.scheduled_at, endAt:row.end_at, createdAt:row.created_at,
+    id:row.id,client:row.client,plant:row.plant,trucks:row.trucks,
+    m3:row.m3,status:row.status,operator:row.operator,
+    destination:row.destination,notes:row.notes||"",
+    concreteType:row.concrete_type||"",
+    scheduledAt:row.scheduled_at,endAt:row.end_at,createdAt:row.created_at,
   };
 }
 function turnToDb(t) {
   return {
-    id:t.id, client:t.client, plant:t.plant, trucks:t.trucks, m3:t.m3,
-    status:t.status, operator:t.operator, destination:t.destination,
-    notes:t.notes||"", scheduled_at:t.scheduledAt, end_at:t.endAt,
-    created_at:t.createdAt,
+    id:t.id,client:t.client,plant:t.plant,trucks:t.trucks,m3:t.m3,
+    status:t.status,operator:t.operator,destination:t.destination,
+    notes:t.notes||"",concrete_type:t.concreteType||"",
+    scheduled_at:t.scheduledAt,end_at:t.endAt,created_at:t.createdAt,
   };
+}
+
+// ── PRINT ─────────────────────────────────────────────────────────────────────
+function printDayReport(turns, day) {
+  const dayTurns = turns
+    .filter(t=>dayKey(t.scheduledAt)===day && t.status!=="cancelado")
+    .sort((a,b)=>a.scheduledAt-b.scheduledAt);
+
+  const rows = dayTurns.map(t=>`
+    <tr>
+      <td>${fmtTime(t.scheduledAt)}${t.endAt?` — ${fmtTime(t.endAt)}`:""}</td>
+      <td><strong>${t.client}</strong></td>
+      <td>${t.concreteType||"—"}</td>
+      <td>${t.m3} m³</td>
+      <td>${(t.trucks||[]).join(", ")}</td>
+      <td>${t.destination}</td>
+      <td>${t.notes||"—"}</td>
+    </tr>
+  `).join("");
+
+  const html = `
+    <!DOCTYPE html>
+    <html lang="es">
+    <head>
+      <meta charset="UTF-8"/>
+      <title>Turnos — ${fmtDateLong(parseDay(day).getTime())}</title>
+      <style>
+        * { margin:0; padding:0; box-sizing:border-box; }
+        body { font-family: Arial, sans-serif; font-size: 12px; color: #111; padding: 24px; }
+        h1 { font-size: 20px; margin-bottom: 4px; }
+        .subtitle { color: #555; margin-bottom: 20px; font-size: 13px; }
+        table { width: 100%; border-collapse: collapse; }
+        th { background: #1a1a2e; color: white; padding: 8px 10px; text-align: left; font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; }
+        td { padding: 8px 10px; border-bottom: 1px solid #e5e5e5; vertical-align: top; }
+        tr:nth-child(even) td { background: #f9f9f9; }
+        .total { margin-top: 16px; font-size: 13px; color: #333; }
+        .footer { margin-top: 32px; font-size: 11px; color: #999; border-top: 1px solid #eee; padding-top: 10px; }
+        @media print { body { padding: 12px; } }
+      </style>
+    </head>
+    <body>
+      <h1>⬡ HormiTurn — Turnos del día</h1>
+      <div class="subtitle">${fmtDateLong(parseDay(day).getTime())} · Generado el ${fmtDate(Date.now())} a las ${fmtTime(Date.now())}</div>
+      ${dayTurns.length===0
+        ? "<p>No hay turnos asignados para este día.</p>"
+        : `<table>
+            <thead>
+              <tr>
+                <th>Horario</th>
+                <th>Cliente</th>
+                <th>Hormigón</th>
+                <th>Cantidad</th>
+                <th>Camiones</th>
+                <th>Dirección</th>
+                <th>Observaciones</th>
+              </tr>
+            </thead>
+            <tbody>${rows}</tbody>
+          </table>
+          <div class="total">
+            Total: <strong>${dayTurns.length}</strong> turno${dayTurns.length!==1?"s":""} · 
+            <strong>${dayTurns.reduce((s,t)=>s+t.m3,0)} m³</strong> programados
+          </div>`
+      }
+      <div class="footer">HormiTurn · Sistema de Gestión de Despacho de Hormigón</div>
+    </body>
+    </html>
+  `;
+
+  const w = window.open("","_blank");
+  w.document.write(html);
+  w.document.close();
+  w.focus();
+  setTimeout(()=>w.print(), 500);
 }
 
 export default function App() {
   const [currentUser,setCurrentUser] = useState(null);
-  const [turns,setTurns]       = useState([]);
-  const [plants,setPlants]     = useState([]);
-  const [trucks,setTrucks]     = useState([]);
-  const [users,setUsers]       = useState([]);
-  const [passwords,setPasswords] = useState({});
-  const [loading,setLoading]   = useState(true);
-  const [view,setView]         = useState("dashboard");
-  const [showForm,setShowForm] = useState(false);
+  const [turns,setTurns]           = useState([]);
+  const [plants,setPlants]         = useState([]);
+  const [trucks,setTrucks]         = useState([]);
+  const [users,setUsers]           = useState([]);
+  const [concreteTypes,setConcreteTypes] = useState([]);
+  const [passwords,setPasswords]   = useState({});
+  const [loading,setLoading]       = useState(true);
+  const [view,setView]             = useState("dashboard");
+  const [showForm,setShowForm]     = useState(false);
   const [editingTurn,setEditingTurn] = useState(null);
   const [showSettings,setShowSettings] = useState(false);
   const [filterStatus,setFilterStatus] = useState("all");
@@ -72,6 +147,7 @@ export default function App() {
           if(row.key==="plants") setPlants(row.value);
           if(row.key==="trucks") setTrucks(row.value);
           if(row.key==="users")  { setUsers(row.value); if(row.passwords) setPasswords(row.passwords); }
+          if(row.key==="concrete_types") setConcreteTypes(row.value);
         });
       }
       const {data:dbTurns} = await supabase.from("turns").select("*").order("scheduled_at");
@@ -97,6 +173,7 @@ export default function App() {
         if(row.key==="plants") setPlants(row.value);
         if(row.key==="trucks") setTrucks(row.value);
         if(row.key==="users")  { setUsers(row.value); if(row.passwords) setPasswords(row.passwords); }
+        if(row.key==="concrete_types") setConcreteTypes(row.value);
       })
       .subscribe();
     return()=>supabase.removeChannel(ch);
@@ -107,14 +184,11 @@ export default function App() {
   async function saveConfig(key,value,extra={}) {
     await supabase.from("config").update({value,...extra}).eq("key",key);
   }
-
   async function handleSaveTurn(data) {
     if(editingTurn) {
-      const updated={...editingTurn,...data};
-      await supabase.from("turns").update(turnToDb(updated)).eq("id",editingTurn.id);
+      await supabase.from("turns").update(turnToDb({...editingTurn,...data})).eq("id",editingTurn.id);
     } else {
-      const t={id:genId(),...data,createdAt:Date.now(),operator:currentUser};
-      await supabase.from("turns").insert(turnToDb(t));
+      await supabase.from("turns").insert(turnToDb({id:genId(),...data,createdAt:Date.now(),operator:currentUser}));
     }
     setShowForm(false); setEditingTurn(null);
   }
@@ -136,32 +210,29 @@ export default function App() {
   }
   async function renameUser(o,n) {
     const next=users.map(x=>x===o?n:x);
-    const nextPw={...passwords};
-    if(nextPw[o]!==undefined){ nextPw[n]=nextPw[o]; delete nextPw[o]; }
-    setUsers(next); setPasswords(nextPw);
-    await saveConfig("users",next,{passwords:nextPw});
+    const nextPw={...passwords}; if(nextPw[o]!==undefined){nextPw[n]=nextPw[o];delete nextPw[o];}
+    setUsers(next); setPasswords(nextPw); await saveConfig("users",next,{passwords:nextPw});
     for(const t of turns.filter(t=>t.operator===o)) await supabase.from("turns").update({operator:n}).eq("id",t.id);
     if(currentUser===o) setCurrentUser(n);
   }
-  async function addPlant(v) { if(plants.includes(v))return; const next=[...plants,v]; setPlants(next); await saveConfig("plants",next); }
-  async function addTruck(v) { if(trucks.includes(v))return; const next=[...trucks,v]; setTrucks(next); await saveConfig("trucks",next); }
-  async function addUser(v)  { if(users.includes(v))return; const next=[...users,v]; setUsers(next); await saveConfig("users",next,{passwords}); }
+  async function renameConcreteType(o,n) {
+    const next=concreteTypes.map(x=>x===o?n:x); setConcreteTypes(next); await saveConfig("concrete_types",next);
+    for(const t of turns.filter(t=>t.concreteType===o)) await supabase.from("turns").update({concrete_type:n}).eq("id",t.id);
+  }
+  async function addPlant(v)  { if(plants.includes(v))return; const next=[...plants,v]; setPlants(next); await saveConfig("plants",next); }
+  async function addTruck(v)  { if(trucks.includes(v))return; const next=[...trucks,v]; setTrucks(next); await saveConfig("trucks",next); }
+  async function addUser(v)   { if(users.includes(v))return;  const next=[...users,v];  setUsers(next);  await saveConfig("users",next,{passwords}); }
+  async function addConcreteType(v) { if(concreteTypes.includes(v))return; const next=[...concreteTypes,v]; setConcreteTypes(next); await saveConfig("concrete_types",next); }
   async function removePlant(v) { const next=plants.filter(x=>x!==v); setPlants(next); await saveConfig("plants",next); await supabase.from("turns").delete().eq("plant",v); }
   async function removeTruck(v) { const next=trucks.filter(x=>x!==v); setTrucks(next); await saveConfig("trucks",next); }
-  async function removeUser(v) {
-    const next=users.filter(x=>x!==v); const nextPw={...passwords}; delete nextPw[v];
-    setUsers(next); setPasswords(nextPw); await saveConfig("users",next,{passwords:nextPw});
-  }
-  async function setPassword(user,pw) {
-    const nextPw={...passwords,[user]:pw};
-    setPasswords(nextPw);
-    await saveConfig("users",users,{passwords:nextPw});
-  }
+  async function removeUser(v)  { const next=users.filter(x=>x!==v); const nextPw={...passwords}; delete nextPw[v]; setUsers(next); setPasswords(nextPw); await saveConfig("users",next,{passwords:nextPw}); }
+  async function removeConcreteType(v) { const next=concreteTypes.filter(x=>x!==v); setConcreteTypes(next); await saveConfig("concrete_types",next); }
+  async function setPassword(user,pw) { const nextPw={...passwords,[user]:pw}; setPasswords(nextPw); await saveConfig("users",users,{passwords:nextPw}); }
 
   function handleLogin(user,pw) {
     const stored=passwords[user];
-    if(!stored) { setCurrentUser(user); return true; }
-    if(stored===pw) { setCurrentUser(user); return true; }
+    if(!stored){setCurrentUser(user);return true;}
+    if(stored===pw){setCurrentUser(user);return true;}
     return false;
   }
 
@@ -186,7 +257,6 @@ export default function App() {
       <div style={{fontSize:13,color:C.muted}}>Conectando con la base de datos</div>
     </div>
   );
-
   if(!currentUser) return <LoginScreen users={users} passwords={passwords} onLogin={handleLogin}/>;
 
   return(
@@ -216,9 +286,17 @@ export default function App() {
             <h1 style={S.pageTitle}>{{dashboard:"Dashboard",turns:"Turnos",calendar:"Calendario",trucks:"Camiones",plants:"Plantas"}[view]}</h1>
             <div style={S.pageDate}>{fmtDate(now)} · {fmtTime(now)}</div>
           </div>
-          {(view==="turns"||view==="calendar")&&(
-            <button onClick={()=>{setEditingTurn(null);setShowForm(true);}} style={S.btnPrimary}>+ Nuevo Turno</button>
-          )}
+          <div style={{display:"flex",gap:10}}>
+            {(view==="dashboard") && (
+              <button onClick={()=>printDayReport(turns,dashDay)} style={S.btnSecondary}>🖨 Imprimir día</button>
+            )}
+            {(view==="calendar") && (
+              <button onClick={()=>printDayReport(turns,calendarDay)} style={S.btnSecondary}>🖨 Imprimir día</button>
+            )}
+            {(view==="turns"||view==="calendar") && (
+              <button onClick={()=>{setEditingTurn(null);setShowForm(true);}} style={S.btnPrimary}>+ Nuevo Turno</button>
+            )}
+          </div>
         </header>
         <div style={S.content}>
           {view==="dashboard"&&<DashboardView stats={stats} turns={dashDayTurns} allTurns={turns} trucks={trucks} onAdvance={handleAdvance} dashDay={dashDay} setDashDay={setDashDay}/>}
@@ -228,17 +306,18 @@ export default function App() {
           {view==="plants"   &&<PlantsView turns={turns} plants={plants} trucks={trucks}/>}
         </div>
       </main>
-      {showForm&&<TurnForm initial={editingTurn} plants={plants} trucks={trucks} users={users} allTurns={turns} currentUser={currentUser} onSave={handleSaveTurn} onClose={()=>{setShowForm(false);setEditingTurn(null);}}/>}
-      {showSettings&&<SettingsModal plants={plants} trucks={trucks} users={users} passwords={passwords} onRenamePlant={renamePlant} onRenameTruck={renameTruck} onRenameUser={renameUser} onAddPlant={addPlant} onAddTruck={addTruck} onAddUser={addUser} onRemovePlant={removePlant} onRemoveTruck={removeTruck} onRemoveUser={removeUser} onSetPassword={setPassword} onClose={()=>setShowSettings(false)}/>}
+      {showForm&&<TurnForm initial={editingTurn} plants={plants} trucks={trucks} users={users} concreteTypes={concreteTypes} allTurns={turns} currentUser={currentUser} onSave={handleSaveTurn} onClose={()=>{setShowForm(false);setEditingTurn(null);}}/>}
+      {showSettings&&<SettingsModal plants={plants} trucks={trucks} users={users} concreteTypes={concreteTypes} passwords={passwords} onRenamePlant={renamePlant} onRenameTruck={renameTruck} onRenameUser={renameUser} onRenameConcreteType={renameConcreteType} onAddPlant={addPlant} onAddTruck={addTruck} onAddUser={addUser} onAddConcreteType={addConcreteType} onRemovePlant={removePlant} onRemoveTruck={removeTruck} onRemoveUser={removeUser} onRemoveConcreteType={removeConcreteType} onSetPassword={setPassword} onClose={()=>setShowSettings(false)}/>}
     </div>
   );
 }
 
+// ── LOGIN ─────────────────────────────────────────────────────────────────────
 function LoginScreen({users,passwords,onLogin}) {
   const [sel,setSel]=useState(null);
   const [pw,setPw]=useState("");
   const [error,setError]=useState(false);
-  function handleLogin() { const ok=onLogin(sel,pw); if(!ok){setError(true);setPw("");} }
+  function handleLogin(){const ok=onLogin(sel,pw);if(!ok){setError(true);setPw("");}}
   const needsPw=sel&&passwords[sel];
   return(
     <div style={S.loginBg}>
@@ -267,6 +346,7 @@ function LoginScreen({users,passwords,onLogin}) {
   );
 }
 
+// ── SETTINGS ──────────────────────────────────────────────────────────────────
 function EditableList({items,onRename,onAdd,onRemove,label,placeholder}) {
   const [editing,setEditing]=useState(null);
   const [newVal,setNewVal]=useState("");
@@ -296,7 +376,7 @@ function PasswordList({users,passwords,onSetPassword}) {
   return(
     <div>
       <div style={{...S.panelTitle,marginBottom:10}}>Contraseñas</div>
-      <p style={{fontSize:12,color:C.muted,marginBottom:14}}>Si un operador no tiene contraseña asignada, puede ingresar sin contraseña.</p>
+      <p style={{fontSize:12,color:C.muted,marginBottom:14}}>Si un operador no tiene contraseña, puede ingresar sin contraseña.</p>
       {users.map((u,i)=>(
         <div key={i} style={S.settingsRow}>
           <div style={S.userAvatar}>{u[0]}</div>
@@ -318,14 +398,14 @@ function PasswordList({users,passwords,onSetPassword}) {
   );
 }
 
-function SettingsModal({plants,trucks,users,passwords,onRenamePlant,onRenameTruck,onRenameUser,onAddPlant,onAddTruck,onAddUser,onRemovePlant,onRemoveTruck,onRemoveUser,onSetPassword,onClose}) {
+function SettingsModal({plants,trucks,users,concreteTypes,passwords,onRenamePlant,onRenameTruck,onRenameUser,onRenameConcreteType,onAddPlant,onAddTruck,onAddUser,onAddConcreteType,onRemovePlant,onRemoveTruck,onRemoveUser,onRemoveConcreteType,onSetPassword,onClose}) {
   const [tab,setTab]=useState("plants");
   return(
     <div style={S.modalOverlay}>
       <div style={{...S.modal,maxWidth:540}}>
         <div style={S.modalHeader}><h2 style={S.modalTitle}>⚙ Configuración</h2><button onClick={onClose} style={S.modalClose}>✕</button></div>
         <div style={{display:"flex",gap:4,padding:"14px 24px 0",borderBottom:`1px solid ${C.border}`,flexWrap:"wrap"}}>
-          {[["plants","🏭 Plantas"],["trucks","🚛 Camiones"],["users","👤 Operadores"],["passwords","🔒 Contraseñas"]].map(([k,l])=>(
+          {[["plants","🏭 Plantas"],["trucks","🚛 Camiones"],["users","👤 Operadores"],["concrete","🪨 Hormigón"],["passwords","🔒 Contraseñas"]].map(([k,l])=>(
             <button key={k} onClick={()=>setTab(k)} style={{...S.tabBtn,...(tab===k?S.tabBtnActive:{})}}>{l}</button>
           ))}
         </div>
@@ -333,6 +413,7 @@ function SettingsModal({plants,trucks,users,passwords,onRenamePlant,onRenameTruc
           {tab==="plants"    &&<EditableList items={plants} onRename={onRenamePlant} onAdd={onAddPlant} onRemove={onRemovePlant} label="Plantas" placeholder="Nueva planta…"/>}
           {tab==="trucks"    &&<EditableList items={trucks} onRename={onRenameTruck} onAdd={onAddTruck} onRemove={onRemoveTruck} label="Camiones" placeholder="Nuevo camión…"/>}
           {tab==="users"     &&<EditableList items={users}  onRename={onRenameUser}  onAdd={onAddUser}  onRemove={onRemoveUser}  label="Operadores" placeholder="Nuevo operador…"/>}
+          {tab==="concrete"  &&<EditableList items={concreteTypes} onRename={onRenameConcreteType} onAdd={onAddConcreteType} onRemove={onRemoveConcreteType} label="Tipos de Hormigón" placeholder="Ej: H-25…"/>}
           {tab==="passwords" &&<PasswordList users={users} passwords={passwords} onSetPassword={onSetPassword}/>}
           <p style={{fontSize:12,color:C.muted,marginTop:4}}>Los cambios se sincronizan para todos los usuarios.</p>
         </div>
@@ -342,6 +423,7 @@ function SettingsModal({plants,trucks,users,passwords,onRenamePlant,onRenameTruc
   );
 }
 
+// ── DASHBOARD ─────────────────────────────────────────────────────────────────
 function DashboardView({stats,turns,allTurns,trucks,onAdvance,dashDay,setDashDay}) {
   const today=dayKey(Date.now());
   const refDate=new Date(); refDate.setHours(0,0,0,0);
@@ -384,6 +466,7 @@ function DashboardView({stats,turns,allTurns,trucks,onAdvance,dashDay,setDashDay
   );
 }
 
+// ── TURNS VIEW ────────────────────────────────────────────────────────────────
 function TurnsView({turns,filterStatus,setFilterStatus,filterPlant,setFilterPlant,filterTruck,setFilterTruck,plants,trucks,onAdvance,onEdit,onCancel,onDelete}) {
   return(
     <div>
@@ -398,6 +481,7 @@ function TurnsView({turns,filterStatus,setFilterStatus,filterPlant,setFilterPlan
   );
 }
 
+// ── TURN CARD ─────────────────────────────────────────────────────────────────
 function TurnCard({turn:t,onAdvance,onEdit,onCancel,onDelete,compact}) {
   const cfg=STATUS_CONFIG[t.status];
   const canAdv=STATUS_FLOW.includes(t.status)&&t.status!=="completado";
@@ -408,11 +492,14 @@ function TurnCard({turn:t,onAdvance,onEdit,onCancel,onDelete,compact}) {
       <div style={S.turnCardTop}>
         <div style={{display:"flex",alignItems:"center",gap:10}}>
           <div style={{...S.statusDot,background:cfg.dot}}/>
-          <div><div style={S.turnClient}>{t.client}</div><div style={S.turnMeta}>{t.plant} · {truckList} · {t.m3}m³ · {timeRange}</div></div>
+          <div>
+            <div style={S.turnClient}>{t.client}</div>
+            <div style={S.turnMeta}>{t.plant} · {truckList} · {t.m3}m³ · {timeRange}{t.concreteType&&` · ${t.concreteType}`}</div>
+          </div>
         </div>
         <div style={{...S.badge,background:cfg.bg,color:cfg.color}}>{cfg.label}</div>
       </div>
-      {!compact&&<div style={S.turnDetails}><span>📍 {t.destination}</span><span>👤 {t.operator}</span>{t.notes&&<span>📝 {t.notes}</span>}</div>}
+      {!compact&&<div style={S.turnDetails}><span>📍 {t.destination}</span><span>👤 {t.operator}</span>{t.concreteType&&<span>🪨 {t.concreteType}</span>}{t.notes&&<span>📝 {t.notes}</span>}</div>}
       {!compact&&<div style={S.turnActions}>
         {canAdv&&<button onClick={()=>onAdvance(t.id)} style={S.btnAdvance}>→ {STATUS_CONFIG[STATUS_FLOW[STATUS_FLOW.indexOf(t.status)+1]]?.label}</button>}
         {onEdit&&!["completado","cancelado"].includes(t.status)&&<button onClick={()=>onEdit(t)} style={S.btnSecondary}>Editar</button>}
@@ -424,6 +511,7 @@ function TurnCard({turn:t,onAdvance,onEdit,onCancel,onDelete,compact}) {
   );
 }
 
+// ── CALENDAR VIEW ─────────────────────────────────────────────────────────────
 function CalendarView({turns,selectedDay,setSelectedDay,onAdvance,onEdit,onCancel}) {
   const today=dayKey(Date.now());
   const refDate=new Date(); refDate.setHours(0,0,0,0);
@@ -436,8 +524,7 @@ function CalendarView({turns,selectedDay,setSelectedDay,onAdvance,onEdit,onCance
   function assignCols(turns) {
     const cols=[]; const assigned=turns.map(t=>{
       const s=new Date(t.scheduledAt); const sm=s.getHours()*60+s.getMinutes();
-      const endTs=t.endAt||t.scheduledAt+3600000;
-      const e=new Date(endTs); const em=e.getHours()*60+e.getMinutes();
+      const endTs=t.endAt||t.scheduledAt+3600000; const e=new Date(endTs); const em=e.getHours()*60+e.getMinutes();
       let col=0; while(cols[col]&&cols[col]>sm)col++;
       cols[col]=em; return {...t,col,startMin:sm,endMin:em};
     });
@@ -474,7 +561,7 @@ function CalendarView({turns,selectedDay,setSelectedDay,onAdvance,onEdit,onCance
                   return <div key={t.id} style={{position:"absolute",top:topPx+2,height:hPx,left:`calc(${t.col*cW}% + 2px)`,width:`calc(${cW}% - 4px)`,background:cfg.bg,border:`1.5px solid ${cfg.color}55`,borderLeft:`4px solid ${cfg.color}`,borderRadius:8,padding:"6px 8px",overflow:"hidden",cursor:"pointer",boxSizing:"border-box",zIndex:2}}>
                     <div style={{fontSize:11,fontWeight:800,color:cfg.color}}>{fmtTime(t.scheduledAt)}{t.endAt&&` → ${fmtTime(t.endAt)}`}</div>
                     <div style={{fontSize:12,fontWeight:700,color:"#1a1a2e",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{t.client}</div>
-                    <div style={{fontSize:10,color:"#555",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{(t.trucks||[]).join(", ")} · {t.m3}m³</div>
+                    <div style={{fontSize:10,color:"#555",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{(t.trucks||[]).join(", ")} · {t.m3}m³{t.concreteType&&` · ${t.concreteType}`}</div>
                     {hPx>90&&<div style={{display:"flex",gap:4,marginTop:6,flexWrap:"wrap"}}>
                       {canAdv&&<button onClick={e=>{e.stopPropagation();onAdvance(t.id);}} style={{...S.calEventBtn,background:cfg.color,color:"#fff",fontSize:9}}>→ Avanzar</button>}
                       <button onClick={e=>{e.stopPropagation();onEdit(t);}} style={{...S.calEventBtn,fontSize:9}}>✎</button>
@@ -492,6 +579,7 @@ function CalendarView({turns,selectedDay,setSelectedDay,onAdvance,onEdit,onCance
   );
 }
 
+// ── TRUCKS & PLANTS ───────────────────────────────────────────────────────────
 function TrucksView({turns,trucks}) {
   return <div style={S.truckGrid}>{trucks.map(tr=>{ const hist=turns.filter(t=>(t.trucks||[]).includes(tr)); const act=hist.find(t=>!["completado","cancelado"].includes(t.status)); const comp=hist.filter(t=>t.status==="completado"); const cfg=act?STATUS_CONFIG[act.status]:{label:"Libre",color:"#10B981",bg:"#D1FAE5"};
     return <div key={tr} style={S.truckCard}><div style={S.truckCardHeader}><span style={{fontSize:28}}>🚛</span><div><div style={S.truckCardName}>{tr}</div><div style={{...S.badge,background:cfg.bg,color:cfg.color}}>{cfg.label}</div></div></div>
@@ -499,7 +587,6 @@ function TrucksView({turns,trucks}) {
       <div style={S.truckStats}><div style={S.truckStat}><span style={S.truckStatNum}>{comp.length}</span>Completados</div><div style={S.truckStat}><span style={S.truckStatNum}>{comp.reduce((s,t)=>s+t.m3,0)}</span>m³</div></div>
     </div>; })}</div>;
 }
-
 function PlantsView({turns,plants,trucks}) {
   return <div style={{display:"flex",gap:20,flexWrap:"wrap"}}>{plants.map(plant=>{ const pt=turns.filter(t=>t.plant===plant); const act=pt.filter(t=>!["completado","cancelado"].includes(t.status)); const comp=pt.filter(t=>t.status==="completado");
     return <div key={plant} style={S.plantCard}><div style={S.plantHeader}><span style={{fontSize:32}}>🏭</span><div><div style={S.plantName}>{plant}</div><div style={S.plantStatus}>{act.length>0?`${act.length} turno(s) activo(s)`:"Sin actividad activa"}</div></div></div>
@@ -511,13 +598,15 @@ function PlantsView({turns,plants,trucks}) {
     </div>; })}</div>;
 }
 
-function TurnForm({initial,plants,trucks,users,allTurns,currentUser,onSave,onClose}) {
+// ── TURN FORM ─────────────────────────────────────────────────────────────────
+function TurnForm({initial,plants,trucks,users,concreteTypes,allTurns,currentUser,onSave,onClose}) {
   const defaultEnd=initial?.endAt||(initial?.scheduledAt?initial.scheduledAt+3600000:Date.now()+3600000);
   const [form,setForm]=useState({
     client:initial?.client||"", plant:initial?.plant||plants[0]||"",
     trucks:initial?.trucks||(initial?.truck?[initial.truck]:[trucks[0]||""]),
     m3:initial?.m3||6, destination:initial?.destination||"",
     notes:initial?.notes||"", status:initial?.status||"pendiente",
+    concreteType:initial?.concreteType||"",
     scheduledAt:initial?.scheduledAt||Date.now(), endAt:defaultEnd,
   });
   const [conflicts,setConflicts]=useState([]);
@@ -540,15 +629,22 @@ function TurnForm({initial,plants,trucks,users,allTurns,currentUser,onSave,onClo
           <div style={S.formGroup}><label style={S.label}>Cliente *</label><input value={form.client} onChange={e=>set("client",e.target.value)} style={S.input} placeholder="Nombre del cliente"/></div>
           <div style={S.formGroup}><label style={S.label}>Destino *</label><input value={form.destination} onChange={e=>set("destination",e.target.value)} style={S.input} placeholder="Dirección de entrega"/></div>
           <div style={S.formGroup}><label style={S.label}>Planta</label><select value={form.plant} onChange={e=>set("plant",e.target.value)} style={S.input}>{plants.map(p=><option key={p}>{p}</option>)}</select></div>
-          <div style={S.formGroup}>{initial&&<><label style={S.label}>Estado</label><select value={form.status} onChange={e=>set("status",e.target.value)} style={S.input}>{Object.entries(STATUS_CONFIG).map(([k,v])=><option key={k} value={k}>{v.label}</option>)}</select></>}</div>
+          <div style={S.formGroup}>
+            <label style={S.label}>Tipo de Hormigón</label>
+            <select value={form.concreteType} onChange={e=>set("concreteType",e.target.value)} style={S.input}>
+              <option value="">— Sin especificar —</option>
+              {concreteTypes.map(c=><option key={c} value={c}>{c}</option>)}
+            </select>
+          </div>
           <div style={S.formGroup}><label style={S.label}>Inicio</label><input type="datetime-local" value={toLocalDT(form.scheduledAt)} onChange={e=>set("scheduledAt",fromLocalDT(e.target.value))} style={S.input}/></div>
           <div style={S.formGroup}>
             <label style={S.label}>Finalización {form.endAt<=form.scheduledAt&&<span style={{color:"#EF4444"}}>⚠ debe ser posterior</span>}</label>
             <input type="datetime-local" value={toLocalDT(form.endAt)} onChange={e=>set("endAt",fromLocalDT(e.target.value))} style={{...S.input,...(form.endAt<=form.scheduledAt?{borderColor:"#EF4444"}:{})}}/>
           </div>
+          {initial&&<div style={S.formGroup}><label style={S.label}>Estado</label><select value={form.status} onChange={e=>set("status",e.target.value)} style={S.input}>{Object.entries(STATUS_CONFIG).map(([k,v])=><option key={k} value={k}>{v.label}</option>)}</select></div>}
           <div style={{...S.formGroup,gridColumn:"1/-1"}}><label style={S.label}>Volumen (m³) — {TRUCK_CAPACITY}m³/camión → necesita {neededTrucks} camión{neededTrucks!==1?"es":""}</label><input type="number" min="1" max="100" value={form.m3} onChange={e=>set("m3",Number(e.target.value))} style={{...S.input,maxWidth:120}}/></div>
           <div style={{...S.formGroup,gridColumn:"1/-1"}}>
-            <label style={S.label}>Camiones ({form.trucks.length} seleccionado{form.trucks.length!==1?"s":""} · cap: {form.trucks.length*TRUCK_CAPACITY}m³){form.trucks.length<neededTrucks&&<span style={{color:"#F59E0B",marginLeft:8}}>⚠ Faltan {neededTrucks-form.trucks.length}</span>}</label>
+            <label style={S.label}>Camiones ({form.trucks.length} sel. · cap: {form.trucks.length*TRUCK_CAPACITY}m³){form.trucks.length<neededTrucks&&<span style={{color:"#F59E0B",marginLeft:8}}>⚠ Faltan {neededTrucks-form.trucks.length}</span>}</label>
             <div style={{display:"flex",flexWrap:"wrap",gap:8,marginTop:4}}>
               {trucks.map(tr=>{ const sel=form.trucks.includes(tr); const hasConfl=conflicts.some(c=>c.conflictTruck===tr);
                 return <button key={tr} onClick={()=>toggleTruck(tr)} style={{padding:"8px 14px",borderRadius:8,border:`2px solid ${hasConfl?"#EF4444":sel?"#4F8EF7":C.border}`,background:hasConfl?"#FEE2E2":sel?`${C.accent}22`:C.bg,color:hasConfl?"#EF4444":sel?C.accent:C.muted,fontWeight:sel?700:400,cursor:"pointer",fontSize:13,display:"flex",alignItems:"center",gap:6}}>🚛 {tr} {hasConfl&&"⚠"}</button>; })}
