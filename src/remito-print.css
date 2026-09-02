@@ -1,0 +1,63 @@
+.remito-print-sheet {
+  display: none;
+}
+
+.rp-sheet {
+  font-family: Arial, Helvetica, sans-serif;
+  color: #111;
+  font-size: 11px;
+  line-height: 1.35;
+}
+.rp-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  border-bottom: 2px solid #111;
+  padding-bottom: 6px;
+  margin-bottom: 10px;
+}
+.rp-company { font-size: 18px; font-weight: 800; }
+.rp-sub { font-size: 11px; color: #444; }
+.rp-meta { text-align: right; }
+.rp-num { font-size: 14px; font-weight: 800; }
+.rp-date { font-size: 11px; color: #444; }
+.rp-section { margin-bottom: 10px; }
+.rp-section-title {
+  font-size: 10px;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: #444;
+  border-bottom: 1px solid #bbb;
+  margin-bottom: 4px;
+  padding-bottom: 2px;
+}
+.rp-field {
+  display: flex;
+  gap: 6px;
+  padding: 2px 0;
+  border-bottom: 1px dashed #ddd;
+}
+.rp-label {
+  width: 130px;
+  flex-shrink: 0;
+  font-weight: 700;
+  color: #333;
+}
+.rp-val { flex: 1; }
+.rp-obs { white-space: pre-wrap; }
+.rp-signature { margin-top: 24px; }
+
+@media print {
+  @page { size: A4; margin: 12mm; }
+  html, body { height: auto !important; }
+  body * { visibility: hidden; }
+  .remito-print-sheet, .remito-print-sheet * { visibility: visible; }
+  .remito-print-sheet {
+    display: block !important;
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+  }
+}
