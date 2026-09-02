@@ -33,6 +33,40 @@ function turnToDb(t) {
   return { id:t.id,client:t.client,plant:t.plant,trucks:t.trucks,m3:t.m3,status:t.status,operator:t.operator,destination:t.destination,notes:t.notes||"",concrete_type:t.concreteType||"",scheduled_at:t.scheduledAt,end_at:t.endAt,created_at:t.createdAt,dest_lat:t.destLat||null,dest_lng:t.destLng||null };
 }
 
+function escapeHtml(s){return String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));}
+function fmtRemitoNum(n){return String(n).padStart(8,"0");}
+function buildRemitoPrintHTML(r){
+  if(!r) return "";
+  const row=(label,val)=>`<div class="rp-field"><span class="rp-label">${escapeHtml(label)}</span><span class="rp-val">${escapeHtml(val||"—")}</span></div>`;
+  return `
+    <div class="rp-sheet">
+      <div class="rp-header">
+        <div><div class="rp-company">Corralón Domus</div><div class="rp-sub">Materiales para la Construcción</div></div>
+        <div class="rp-meta"><div class="rp-num">Remito N° ${fmtRemitoNum(r.numero)}</div><div class="rp-date">${escapeHtml(r.fecha)}</div></div>
+      </div>
+      <div class="rp-section"><div class="rp-section-title">Datos del cliente</div>
+        ${row("Señor(es)",r.cliente)}${row("Domicilio",r.domicilio)}${row("Teléfono",r.telefono)}${row("Cliente N°",r.cliente_numero)}
+        ${r.observaciones?`<div class="rp-field"><span class="rp-label">Observaciones</span><span class="rp-val">${escapeHtml(r.observaciones)}</span></div>`:""}
+      </div>
+      <div class="rp-section"><div class="rp-section-title">Producto y dosificación</div>
+        ${row("Producto",r.producto)}${row("Cantidad",r.cantidad?`${r.cantidad} m³`:"")}${row("Asentamiento",r.asentamiento?`${r.asentamiento} cm`:"")}
+        ${row("Aditivo",r.aditivo_tipo)}${row("Cant. aditivo",r.aditivo_cantidad)}
+      </div>
+      <div class="rp-section"><div class="rp-section-title">Entrega en obra</div>
+        ${row("Agua agregada",r.agua_agregada?`${r.agua_agregada} L`:"")}
+        ${row("Camión",r.camion)}${row("Patente",r.patente)}${row("Chofer",r.chofer)}${row("Confeccionó",r.confeccionado_por)}
+      </div>
+      <div class="rp-section rp-signature">${row("Firma y aclaración",r.firma_aclaracion)}</div>
+      ${r.observaciones_final?`<div class="rp-section"><div class="rp-section-title">Observaciones</div><div class="rp-obs">${escapeHtml(r.observaciones_final)}</div></div>`:""}
+    </div>`;
+}
+function printRemito(r){
+  const el=document.getElementById("remito-print-root");
+  if(!el) return;
+  el.innerHTML=buildRemitoPrintHTML(r);
+  window.print();
+}
+
 function distancia(lat1,lng1,lat2,lng2) {
   const R=6371000;
   const dLat=(lat2-lat1)*Math.PI/180;
@@ -327,6 +361,10 @@ export default function App() {
   const [dashDay,setDashDay]=useState(dayKey(Date.now()));
   const [now,setNow]=useState(Date.now());
   const [emailStatus,setEmailStatus]=useState(null);
+  const [remitos,setRemitos]=useState([]);
+  const [choferes,setChoferes]=useState([]);
+  const [patentes,setPatentes]=useState({});
+  const [showRemitoForm,setShowRemitoForm]=useState(false);
 
   useEffect(()=>{
     async function load(){
@@ -341,9 +379,13 @@ export default function App() {
         if(row.key==="plants_geo") setPlantsGeo(row.value);
         if(row.key==="email_config") setEmailConfig(row.value);
         if(row.key==="user_emails") setUserEmails(row.value||{});
+        if(row.key==="choferes") setChoferes(row.value);
+        if(row.key==="patentes") setPatentes(row.value||{});
       });}
       const {data:dbTurns}=await supabase.from("turns").select("*").order("scheduled_at");
       if(dbTurns) setTurns(dbTurns.map(dbToTurn));
+      const {data:dbRemitos}=await supabase.from("remitos").select("*").order("numero",{ascending:false});
+      if(dbRemitos) setRemitos(dbRemitos);
       setLoading(false);
     }
     load();
@@ -359,6 +401,14 @@ export default function App() {
   },[]);
 
   useEffect(()=>{
+    const ch=supabase.channel("remitos-rt")
+      .on("postgres_changes",{event:"INSERT",schema:"public",table:"remitos"},p=>setRemitos(prev=>prev.some(r=>r.numero===p.new.numero)?prev:[p.new,...prev]))
+      .on("postgres_changes",{event:"UPDATE",schema:"public",table:"remitos"},p=>setRemitos(prev=>prev.map(r=>r.numero===p.new.numero?p.new:r)))
+      .subscribe();
+    return()=>supabase.removeChannel(ch);
+  },[]);
+
+  useEffect(()=>{
     const ch=supabase.channel("config-rt")
       .on("postgres_changes",{event:"UPDATE",schema:"public",table:"config"},p=>{
         const row=p.new;
@@ -369,6 +419,8 @@ export default function App() {
         if(row.key==="infotrak") setInfotrakConfig(row.value);
         if(row.key==="plants_geo") setPlantsGeo(row.value);
         if(row.key==="user_emails") setUserEmails(row.value||{});
+        if(row.key==="choferes") setChoferes(row.value);
+        if(row.key==="patentes") setPatentes(row.value||{});
       })
       .subscribe();
     return()=>supabase.removeChannel(ch);
@@ -391,8 +443,34 @@ export default function App() {
   async function handleCancel(id){await supabase.from("turns").update({status:"cancelado"}).eq("id",id);}
   async function handleDelete(id){await supabase.from("turns").delete().eq("id",id);}
 
+  async function handleRemitoGenerated(camion){
+    if(!camion) return;
+    const active=turns.find(t=>(t.trucks||[]).some(tr=>tr.toLowerCase()===camion.toLowerCase())&&!["completado","cancelado"].includes(t.status));
+    if(active&&(active.status==="pendiente"||active.status==="en_planta")){
+      await supabase.from("turns").update({status:"en_ruta"}).eq("id",active.id);
+    }
+  }
+  async function handleSaveRemito(data){
+    const row={
+      fecha:new Date().toISOString().slice(0,10),
+      cliente:data.cliente,domicilio:data.domicilio,telefono:data.telefono,
+      cliente_numero:data.clienteNumero,observaciones:data.observaciones,
+      producto:data.producto,cantidad:data.cantidad,asentamiento:data.asentamiento,
+      aditivo_tipo:data.aditivoTipo,aditivo_cantidad:data.aditivoCantidad,
+      agua_agregada:data.aguaAgregada,camion:data.camion,patente:data.patente,
+      chofer:data.chofer,confeccionado_por:data.confeccionadoPor,
+      firma_aclaracion:data.firmaAclaracion,observaciones_final:data.observacionesFinal,
+    };
+    const {data:inserted,error}=await supabase.from("remitos").insert(row).select().single();
+    if(error){window.alert("No se pudo guardar el remito: "+error.message);return null;}
+    if(data.camion) await handleRemitoGenerated(data.camion);
+    setShowRemitoForm(false);
+    printRemito(inserted);
+    return inserted;
+  }
+
   async function renamePlant(o,n){const next=plants.map(x=>x===o?n:x);setPlants(next);await saveConfig("plants",next);for(const t of turns.filter(t=>t.plant===o))await supabase.from("turns").update({plant:n}).eq("id",t.id);}
-  async function renameTruck(o,n){const next=trucks.map(x=>x===o?n:x);setTrucks(next);await saveConfig("trucks",next);for(const t of turns.filter(t=>(t.trucks||[]).includes(o)))await supabase.from("turns").update({trucks:(t.trucks||[]).map(x=>x===o?n:x)}).eq("id",t.id);}
+  async function renameTruck(o,n){const next=trucks.map(x=>x===o?n:x);setTrucks(next);await saveConfig("trucks",next);for(const t of turns.filter(t=>(t.trucks||[]).includes(o)))await supabase.from("turns").update({trucks:(t.trucks||[]).map(x=>x===o?n:x)}).eq("id",t.id);if(patentes[o]!==undefined){const nextP={...patentes};nextP[n]=nextP[o];delete nextP[o];setPatentes(nextP);await saveConfig("patentes",nextP);}for(const r of remitos.filter(r=>r.camion===o))await supabase.from("remitos").update({camion:n}).eq("numero",r.numero);}
   async function renameUser(o,n){const next=users.map(x=>x===o?n:x);const nextPw={...passwords};if(nextPw[o]!==undefined){nextPw[n]=nextPw[o];delete nextPw[o];}const nextEm={...userEmails};if(nextEm[o]!==undefined){nextEm[n]=nextEm[o];delete nextEm[o];}setUsers(next);setPasswords(nextPw);setUserEmails(nextEm);await saveConfig("users",next,{passwords:nextPw});await supabase.from("config").update({value:nextEm}).eq("key","user_emails");for(const t of turns.filter(t=>t.operator===o))await supabase.from("turns").update({operator:n}).eq("id",t.id);if(currentUser===o)setCurrentUser(n);}
   async function renameConcreteType(o,n){const next=concreteTypes.map(x=>x===o?n:x);setConcreteTypes(next);await saveConfig("concrete_types",next);for(const t of turns.filter(t=>t.concreteType===o))await supabase.from("turns").update({concrete_type:n}).eq("id",t.id);}
   async function addPlant(v){if(plants.includes(v))return;const next=[...plants,v];setPlants(next);await saveConfig("plants",next);}
@@ -400,7 +478,11 @@ export default function App() {
   async function addUser(v){if(users.includes(v))return;const next=[...users,v];setUsers(next);await saveConfig("users",next,{passwords});}
   async function addConcreteType(v){if(concreteTypes.includes(v))return;const next=[...concreteTypes,v];setConcreteTypes(next);await saveConfig("concrete_types",next);}
   async function removePlant(v){const next=plants.filter(x=>x!==v);setPlants(next);await saveConfig("plants",next);await supabase.from("turns").delete().eq("plant",v);}
-  async function removeTruck(v){const next=trucks.filter(x=>x!==v);setTrucks(next);await saveConfig("trucks",next);}
+  async function removeTruck(v){const next=trucks.filter(x=>x!==v);setTrucks(next);await saveConfig("trucks",next);if(patentes[v]!==undefined){const nextP={...patentes};delete nextP[v];setPatentes(nextP);await saveConfig("patentes",nextP);}}
+  async function addChofer(v){if(choferes.includes(v))return;const next=[...choferes,v];setChoferes(next);await saveConfig("choferes",next);}
+  async function removeChofer(v){const next=choferes.filter(x=>x!==v);setChoferes(next);await saveConfig("choferes",next);}
+  async function renameChofer(o,n){const next=choferes.map(x=>x===o?n:x);setChoferes(next);await saveConfig("choferes",next);for(const r of remitos.filter(r=>r.chofer===o))await supabase.from("remitos").update({chofer:n}).eq("numero",r.numero);}
+  async function setPatente(camion,patente){const next={...patentes,[camion]:patente};setPatentes(next);await saveConfig("patentes",next);}
   async function removeUser(v){const next=users.filter(x=>x!==v);const nextPw={...passwords};delete nextPw[v];const nextEm={...userEmails};delete nextEm[v];setUsers(next);setPasswords(nextPw);setUserEmails(nextEm);await saveConfig("users",next,{passwords:nextPw});await supabase.from("config").update({value:nextEm}).eq("key","user_emails");}
   async function removeConcreteType(v){const next=concreteTypes.filter(x=>x!==v);setConcreteTypes(next);await saveConfig("concrete_types",next);}
   async function setPassword(user,pw){const nextPw={...passwords,[user]:pw};setPasswords(nextPw);await saveConfig("users",users,{passwords:nextPw});}
@@ -426,7 +508,7 @@ export default function App() {
       <aside style={S.sidebar}>
         <div style={S.sidebarLogo}><div style={S.logoIcon}>⬡</div><div><div style={S.logoTitle}>HormiTurn</div><div style={S.logoSub}>Gestión de Despacho</div></div></div>
         <nav style={S.nav}>
-          {[{key:"dashboard",icon:"◈",label:"Dashboard"},{key:"turns",icon:"≡",label:"Turnos"},{key:"calendar",icon:"▦",label:"Calendario"},{key:"map",icon:"🗺",label:"Mapa GPS"},{key:"trucks",icon:"◉",label:"Camiones"},{key:"plants",icon:"⬟",label:"Plantas"}].map(item=>(
+          {[{key:"dashboard",icon:"◈",label:"Dashboard"},{key:"turns",icon:"≡",label:"Turnos"},{key:"remitos",icon:"🧾",label:"Remitos"},{key:"calendar",icon:"▦",label:"Calendario"},{key:"map",icon:"🗺",label:"Mapa GPS"},{key:"trucks",icon:"◉",label:"Camiones"},{key:"plants",icon:"⬟",label:"Plantas"}].map(item=>(
             <button key={item.key} onClick={()=>setView(item.key)} style={{...S.navItem,...(view===item.key?S.navItemActive:{})}}><span style={S.navIcon}>{item.icon}</span>{item.label}</button>
           ))}
           <button onClick={()=>setShowSettings(true)} style={{...S.navItem,marginTop:"auto"}}><span style={S.navIcon}>⚙</span>Configuración</button>
@@ -439,7 +521,7 @@ export default function App() {
       <main style={S.main}>
         <header style={S.header}>
           <div>
-            <h1 style={S.pageTitle}>{{dashboard:"Dashboard",turns:"Turnos",calendar:"Calendario",map:"Mapa GPS",trucks:"Camiones",plants:"Plantas"}[view]}</h1>
+            <h1 style={S.pageTitle}>{{dashboard:"Dashboard",turns:"Turnos",remitos:"Remitos",calendar:"Calendario",map:"Mapa GPS",trucks:"Camiones",plants:"Plantas"}[view]}</h1>
             <div style={S.pageDate}>{fmtDate(now)} · {fmtTime(now)}</div>
           </div>
           <div style={{display:"flex",gap:10,alignItems:"center"}}>
@@ -452,6 +534,7 @@ export default function App() {
             </>}
             {view==="calendar"&&<button onClick={()=>printDayReport(turns,calendarDay)} style={S.btnSecondary}>🖨 Imprimir</button>}
             {(view==="turns"||view==="calendar")&&<button onClick={()=>{setEditingTurn(null);setShowForm(true);}} style={S.btnPrimary}>+ Nuevo Turno</button>}
+            {view==="remitos"&&<button onClick={()=>setShowRemitoForm(true)} style={S.btnPrimary}>+ Nuevo remito</button>}
           </div>
         </header>
         <div style={S.content}>
@@ -461,10 +544,13 @@ export default function App() {
           {view==="map"      &&<MapView turns={turns} infotrakConfig={infotrakConfig} plantsGeo={plantsGeo} onUpdateStatus={handleUpdateStatus}/>}
           {view==="trucks"   &&<TrucksView turns={turns} trucks={trucks}/>}
           {view==="plants"   &&<PlantsView turns={turns} plants={plants} trucks={trucks}/>}
+          {view==="remitos"  &&<RemitosView remitos={remitos} onReprint={printRemito}/>}
         </div>
       </main>
       {showForm&&<TurnForm initial={editingTurn} plants={plants} trucks={trucks} users={users} concreteTypes={concreteTypes} allTurns={turns} currentUser={currentUser} onSave={handleSaveTurn} onClose={()=>{setShowForm(false);setEditingTurn(null);}}/>}
-      {showSettings&&<SettingsModal plants={plants} trucks={trucks} users={users} concreteTypes={concreteTypes} passwords={passwords} userEmails={userEmails} onRenamePlant={renamePlant} onRenameTruck={renameTruck} onRenameUser={renameUser} onRenameConcreteType={renameConcreteType} onAddPlant={addPlant} onAddTruck={addTruck} onAddUser={addUser} onAddConcreteType={addConcreteType} onRemovePlant={removePlant} onRemoveTruck={removeTruck} onRemoveUser={removeUser} onRemoveConcreteType={removeConcreteType} onSetPassword={setPassword} onSetUserEmail={setUserEmail} onClose={()=>setShowSettings(false)}/>}
+      {showSettings&&<SettingsModal plants={plants} trucks={trucks} users={users} concreteTypes={concreteTypes} passwords={passwords} userEmails={userEmails} choferes={choferes} patentes={patentes} onRenamePlant={renamePlant} onRenameTruck={renameTruck} onRenameUser={renameUser} onRenameConcreteType={renameConcreteType} onAddPlant={addPlant} onAddTruck={addTruck} onAddUser={addUser} onAddConcreteType={addConcreteType} onRemovePlant={removePlant} onRemoveTruck={removeTruck} onRemoveUser={removeUser} onRemoveConcreteType={removeConcreteType} onSetPassword={setPassword} onSetUserEmail={setUserEmail} onAddChofer={addChofer} onRemoveChofer={removeChofer} onRenameChofer={renameChofer} onSetPatente={setPatente} onClose={()=>setShowSettings(false)}/>}
+      {showRemitoForm&&<RemitoForm plants={plants} trucks={trucks} choferes={choferes} patentes={patentes} concreteTypes={concreteTypes} turns={turns} currentUser={currentUser} onSave={handleSaveRemito} onClose={()=>setShowRemitoForm(false)}/>}
+      <div id="remito-print-root" className="remito-print-sheet"></div>
     </div>
   );
 }
@@ -477,7 +563,9 @@ function PasswordList({users,passwords,onSetPassword}){const [editing,setEditing
 
 function EmailList({users,userEmails,onSetUserEmail}){const [editing,setEditing]=useState(null);const [val,setVal]=useState("");return(<div><div style={{...S.panelTitle,marginBottom:10}}>Emails de operadores</div><p style={{fontSize:12,color:C.muted,marginBottom:14}}>Los operadores con email recibirán el resumen de turnos del día siguiente.</p>{users.map((u,i)=>(<div key={i} style={S.settingsRow}><div style={S.userAvatar}>{u[0]}</div><span style={{flex:1,fontSize:14}}>{u}</span>{editing===u?<><input type="email" value={val} onChange={e=>setVal(e.target.value)} placeholder="email@ejemplo.com" style={{...S.input,width:200,padding:"5px 10px",fontSize:13}} autoFocus onKeyDown={e=>{if(e.key==="Enter"){onSetUserEmail(u,val);setEditing(null);setVal("");}if(e.key==="Escape"){setEditing(null);setVal("");}}}/><button onClick={()=>{onSetUserEmail(u,val);setEditing(null);setVal("");}} style={S.btnSave}>✓</button><button onClick={()=>{setEditing(null);setVal("");}} style={S.btnCancelSm}>✕</button></>:<><span style={{fontSize:12,color:userEmails[u]?"#10B981":C.muted,marginRight:8,overflow:"hidden",textOverflow:"ellipsis",maxWidth:180}}>{userEmails[u]||"Sin email"}</span><button onClick={()=>{setEditing(u);setVal(userEmails[u]||"");}} style={S.btnEdit}>{userEmails[u]?"Cambiar":"Asignar"}</button>{userEmails[u]&&<button onClick={()=>onSetUserEmail(u,"")} style={S.btnDangerSm}>✕</button>}</>}</div>))}</div>);}
 
-function SettingsModal({plants,trucks,users,concreteTypes,passwords,userEmails,onRenamePlant,onRenameTruck,onRenameUser,onRenameConcreteType,onAddPlant,onAddTruck,onAddUser,onAddConcreteType,onRemovePlant,onRemoveTruck,onRemoveUser,onRemoveConcreteType,onSetPassword,onSetUserEmail,onClose}){const [tab,setTab]=useState("plants");return(<div style={S.modalOverlay}><div style={{...S.modal,maxWidth:560}}><div style={S.modalHeader}><h2 style={S.modalTitle}>⚙ Configuración</h2><button onClick={onClose} style={S.modalClose}>✕</button></div><div style={{display:"flex",gap:4,padding:"14px 24px 0",borderBottom:`1px solid ${C.border}`,flexWrap:"wrap"}}>{[["plants","🏭 Plantas"],["trucks","🚛 Camiones"],["users","👤 Operadores"],["concrete","🪨 Hormigón"],["passwords","🔒 Contraseñas"],["emails","📧 Emails"]].map(([k,l])=>(<button key={k} onClick={()=>setTab(k)} style={{...S.tabBtn,...(tab===k?S.tabBtnActive:{})}}>{l}</button>))}</div><div style={{padding:24,maxHeight:"60vh",overflowY:"auto"}}>{tab==="plants"&&<EditableList items={plants} onRename={onRenamePlant} onAdd={onAddPlant} onRemove={onRemovePlant} label="Plantas" placeholder="Nueva planta…"/>}{tab==="trucks"&&<EditableList items={trucks} onRename={onRenameTruck} onAdd={onAddTruck} onRemove={onRemoveTruck} label="Camiones" placeholder="Nuevo camión…"/>}{tab==="users"&&<EditableList items={users} onRename={onRenameUser} onAdd={onAddUser} onRemove={onRemoveUser} label="Operadores" placeholder="Nuevo operador…"/>}{tab==="concrete"&&<EditableList items={concreteTypes} onRename={onRenameConcreteType} onAdd={onAddConcreteType} onRemove={onRemoveConcreteType} label="Tipos de Hormigón" placeholder="Ej: H-25…"/>}{tab==="passwords"&&<PasswordList users={users} passwords={passwords} onSetPassword={onSetPassword}/>}{tab==="emails"&&<EmailList users={users} userEmails={userEmails} onSetUserEmail={onSetUserEmail}/>}<p style={{fontSize:12,color:C.muted,marginTop:4}}>Los cambios se sincronizan para todos los usuarios.</p></div><div style={S.modalFooter}><button onClick={onClose} style={S.btnPrimary}>Listo</button></div></div></div>);}
+function PatentesList({trucks,patentes,onSetPatente}){const [editing,setEditing]=useState(null);const [val,setVal]=useState("");return(<div><div style={{...S.panelTitle,marginBottom:10}}>Patentes por camión</div><p style={{fontSize:12,color:C.muted,marginBottom:14}}>Se usa para autocompletar la patente en los remitos.</p>{trucks.length===0&&<div style={S.empty}>Agregá camiones primero en la pestaña "Camiones".</div>}{trucks.map((tr,i)=>(<div key={i} style={S.settingsRow}><div style={S.truckIcon}>🚛</div><span style={{flex:1,fontSize:14}}>{tr}</span>{editing===tr?<><input value={val} onChange={e=>setVal(e.target.value)} placeholder="AB123CD" style={{...S.input,width:140,padding:"5px 10px",fontSize:13,textTransform:"uppercase"}} autoFocus onKeyDown={e=>{if(e.key==="Enter"){onSetPatente(tr,val.trim().toUpperCase());setEditing(null);setVal("");}if(e.key==="Escape"){setEditing(null);setVal("");}}}/><button onClick={()=>{onSetPatente(tr,val.trim().toUpperCase());setEditing(null);setVal("");}} style={S.btnSave}>✓</button><button onClick={()=>{setEditing(null);setVal("");}} style={S.btnCancelSm}>✕</button></>:<><span style={{fontSize:12,color:patentes[tr]?"#10B981":C.muted,marginRight:8}}>{patentes[tr]||"Sin patente"}</span><button onClick={()=>{setEditing(tr);setVal(patentes[tr]||"");}} style={S.btnEdit}>{patentes[tr]?"Cambiar":"Asignar"}</button></>}</div>))}</div>);}
+
+function SettingsModal({plants,trucks,users,concreteTypes,passwords,userEmails,choferes,patentes,onRenamePlant,onRenameTruck,onRenameUser,onRenameConcreteType,onAddPlant,onAddTruck,onAddUser,onAddConcreteType,onRemovePlant,onRemoveTruck,onRemoveUser,onRemoveConcreteType,onSetPassword,onSetUserEmail,onAddChofer,onRemoveChofer,onRenameChofer,onSetPatente,onClose}){const [tab,setTab]=useState("plants");return(<div style={S.modalOverlay}><div style={{...S.modal,maxWidth:560}}><div style={S.modalHeader}><h2 style={S.modalTitle}>⚙ Configuración</h2><button onClick={onClose} style={S.modalClose}>✕</button></div><div style={{display:"flex",gap:4,padding:"14px 24px 0",borderBottom:`1px solid ${C.border}`,flexWrap:"wrap"}}>{[["plants","🏭 Plantas"],["trucks","🚛 Camiones"],["patentes","🔖 Patentes"],["users","👤 Operadores"],["choferes","🧑‍✈️ Choferes"],["concrete","🪨 Hormigón"],["passwords","🔒 Contraseñas"],["emails","📧 Emails"]].map(([k,l])=>(<button key={k} onClick={()=>setTab(k)} style={{...S.tabBtn,...(tab===k?S.tabBtnActive:{})}}>{l}</button>))}</div><div style={{padding:24,maxHeight:"60vh",overflowY:"auto"}}>{tab==="plants"&&<EditableList items={plants} onRename={onRenamePlant} onAdd={onAddPlant} onRemove={onRemovePlant} label="Plantas" placeholder="Nueva planta…"/>}{tab==="trucks"&&<EditableList items={trucks} onRename={onRenameTruck} onAdd={onAddTruck} onRemove={onRemoveTruck} label="Camiones" placeholder="Nuevo camión…"/>}{tab==="patentes"&&<PatentesList trucks={trucks} patentes={patentes} onSetPatente={onSetPatente}/>}{tab==="users"&&<EditableList items={users} onRename={onRenameUser} onAdd={onAddUser} onRemove={onRemoveUser} label="Operadores" placeholder="Nuevo operador…"/>}{tab==="choferes"&&<EditableList items={choferes} onRename={onRenameChofer} onAdd={onAddChofer} onRemove={onRemoveChofer} label="Choferes" placeholder="Nuevo chofer…"/>}{tab==="concrete"&&<EditableList items={concreteTypes} onRename={onRenameConcreteType} onAdd={onAddConcreteType} onRemove={onRemoveConcreteType} label="Tipos de Hormigón" placeholder="Ej: H-25…"/>}{tab==="passwords"&&<PasswordList users={users} passwords={passwords} onSetPassword={onSetPassword}/>}{tab==="emails"&&<EmailList users={users} userEmails={userEmails} onSetUserEmail={onSetUserEmail}/>}<p style={{fontSize:12,color:C.muted,marginTop:4}}>Los cambios se sincronizan para todos los usuarios.</p></div><div style={S.modalFooter}><button onClick={onClose} style={S.btnPrimary}>Listo</button></div></div></div>);}
 
 function DashboardView({stats,turns,allTurns,trucks,onAdvance,dashDay,setDashDay}){const today=dayKey(Date.now());const refDate=new Date();refDate.setHours(0,0,0,0);const weekDays=Array.from({length:15},(_,i)=>{const d=new Date(refDate);d.setDate(d.getDate()+i-7);return dayKey(d.getTime());});const hasAct=k=>allTurns.some(t=>dayKey(t.scheduledAt)===k);const active=turns.filter(t=>!["completado","cancelado"].includes(t.status));return(<div><div style={{...S.panel,marginBottom:20,padding:"14px 16px"}}><div style={{display:"flex",alignItems:"center",gap:8,marginBottom:10}}><span style={{fontSize:13,fontWeight:700,color:C.muted,textTransform:"uppercase",letterSpacing:.5}}>Filtrando por día</span>{dashDay!==today&&<button onClick={()=>setDashDay(today)} style={{...S.btnEdit,fontSize:11,padding:"2px 8px"}}>Hoy</button>}</div><div style={{display:"flex",gap:5,overflowX:"auto",paddingBottom:4}}>{weekDays.map(k=>{const d=parseDay(k);const isSel=k===dashDay;const isToday=k===today;return <button key={k} onClick={()=>setDashDay(k)} style={{...S.calDayBtn,...(isSel?S.calDayBtnActive:{}),...(isToday&&!isSel?S.calDayBtnToday:{}),minWidth:50}}><span style={{fontSize:9,fontWeight:600,textTransform:"uppercase",opacity:.7}}>{d.toLocaleDateString("es-AR",{weekday:"short"})}</span><span style={{fontSize:15,fontWeight:700}}>{String(d.getDate()).padStart(2,"0")}</span>{hasAct(k)&&<div style={{...S.calDot,...(isSel?{background:"#fff"}:{})}}/>}</button>;})}</div></div><div style={S.statsGrid}>{[{label:"Turnos Activos",value:stats.active,icon:"◎",color:"#3B82F6"},{label:"Completados",value:stats.completed,icon:"✓",color:"#10B981"},{label:"m³ Despachados",value:stats.m3Today,icon:"⬡",color:"#8B5CF6"},{label:"Total del día",value:stats.total,icon:"≡",color:"#F59E0B"}].map((s,i)=>(<div key={i} style={S.statCard}><div style={{...S.statIcon,color:s.color}}>{s.icon}</div><div style={S.statValue}>{s.value}</div><div style={S.statLabel}>{s.label}</div></div>))}</div><div style={S.dashGrid}><div style={S.panel}><h2 style={S.panelTitle}>Turnos en Curso</h2>{active.length===0?<div style={S.empty}>Sin turnos activos en este día</div>:active.map(t=><TurnCard key={t.id} turn={t} onAdvance={onAdvance} compact/>)}</div><div style={S.panel}><h2 style={S.panelTitle}>Estado de Camiones</h2>{trucks.map(tr=>{const act=allTurns.find(t=>(t.trucks||[]).includes(tr)&&!["completado","cancelado"].includes(t.status));const cfg=act?STATUS_CONFIG[act.status]:{label:"Libre",color:"#10B981",bg:"#D1FAE5"};return <div key={tr} style={S.truckRow}><div style={S.truckIcon}>🚛</div><div style={{flex:1}}><div style={S.truckName}>{tr}</div>{act&&<div style={S.truckClient}>{act.client} · {act.m3}m³</div>}</div><div style={{...S.badge,background:cfg.bg,color:cfg.color}}>{cfg.label}</div></div>;})}</div></div></div>);}
 
@@ -540,6 +628,77 @@ function TurnForm({initial,plants,trucks,users,concreteTypes,allTurns,currentUse
     {conflicts.length>0&&<div style={{...S.formGroup,gridColumn:"1/-1"}}><div style={{background:"#FEE2E2",border:"1px solid #EF444455",borderRadius:8,padding:12}}><div style={{fontWeight:700,color:"#EF4444",marginBottom:6}}>⚠ Conflicto de horario</div>{conflicts.map(c=><div key={c.id} style={{fontSize:13,color:"#7f1d1d",marginBottom:4}}>{c.conflictTruck}: <strong>{c.client}</strong> ({fmtTime(c.scheduledAt)}{c.endAt?` → ${fmtTime(c.endAt)}`:""})</div>)}<div style={{fontSize:12,color:"#7f1d1d",marginTop:6}}>Cambiá el horario o seleccioná otros camiones.</div></div></div>}
     <div style={{...S.formGroup,gridColumn:"1/-1"}}><label style={S.label}>Notas</label><textarea value={form.notes} onChange={e=>set("notes",e.target.value)} style={{...S.input,minHeight:52,resize:"vertical"}} placeholder="Observaciones…"/></div>
   </div><div style={S.modalFooter}><button onClick={onClose} style={S.btnSecondary}>Cancelar</button><button onClick={()=>{if(canSave)onSave({...form,m3:parseFloat(form.m3)});}} style={{...S.btnPrimary,opacity:canSave?1:.45,cursor:canSave?"pointer":"not-allowed"}}>{initial?"Guardar":"Crear turno"}</button></div></div></div>);}
+
+function RemitosView({remitos,onReprint}){
+  const [q,setQ]=useState("");
+  const filtered=q.trim()?remitos.filter(r=>(r.cliente||"").toLowerCase().includes(q.toLowerCase())||String(r.numero).includes(q)||(r.camion||"").toLowerCase().includes(q.toLowerCase())):remitos;
+  return(<div>
+    <div style={S.filters}><input value={q} onChange={e=>setQ(e.target.value)} placeholder="Buscar por cliente, camión o N°…" style={{...S.select,minWidth:260}}/></div>
+    {filtered.length===0&&<div style={S.empty}>Sin remitos{q?" que coincidan":""}</div>}
+    <div style={{display:"flex",flexDirection:"column",gap:10}}>
+      {filtered.map(r=>(
+        <div key={r.numero} style={S.turnCard}>
+          <div style={S.turnCardTop}>
+            <div>
+              <div style={S.turnClient}>N° {fmtRemitoNum(r.numero)} · {r.cliente}</div>
+              <div style={S.turnMeta}>{r.fecha} · {r.producto}{r.cantidad?` · ${r.cantidad} m³`:""}{r.camion?` · ${r.camion}`:""}{r.chofer?` · ${r.chofer}`:""}</div>
+            </div>
+            <button onClick={()=>onReprint(r)} style={S.btnSecondary}>🖨 Reimprimir</button>
+          </div>
+        </div>
+      ))}
+    </div>
+  </div>);
+}
+
+function RemitoForm({trucks,choferes,patentes,concreteTypes,turns,currentUser,onSave,onClose}){
+  const today=dayKey(Date.now());
+  const clientesHoy=[...new Set(turns.filter(t=>dayKey(t.scheduledAt)===today&&t.status!=="cancelado").map(t=>t.client).filter(Boolean))];
+  const [form,setForm]=useState({
+    cliente:"",domicilio:"",telefono:"",clienteNumero:"",observaciones:"",
+    producto:concreteTypes[0]||"",cantidad:"",asentamiento:"",aditivoTipo:"",aditivoCantidad:"",
+    aguaAgregada:"",camion:trucks[0]||"",chofer:choferes[0]||"",confeccionadoPor:currentUser||"",
+    firmaAclaracion:"",observacionesFinal:"",
+  });
+  const [saving,setSaving]=useState(false);
+  const set=(k,v)=>setForm(p=>({...p,[k]:v}));
+  const patente=form.camion?(patentes[form.camion]||""):"";
+  const canSave=form.cliente.trim()&&form.producto.trim()&&!saving;
+  async function handleSubmit(){
+    if(!canSave) return;
+    setSaving(true);
+    await onSave({...form,patente});
+    setSaving(false);
+  }
+  return(<div style={S.modalOverlay}><div style={{...S.modal,maxWidth:640}}>
+    <div style={S.modalHeader}><h2 style={S.modalTitle}>🧾 Nuevo remito</h2><button onClick={onClose} style={S.modalClose}>✕</button></div>
+    <div style={{...S.formGrid,gap:14}}>
+      <div style={S.formGroup}><label style={S.label}>Señor(es) / Cliente *</label><input list="remito-clientes-hoy" value={form.cliente} onChange={e=>set("cliente",e.target.value)} style={S.input} placeholder="Nombre del cliente"/>
+        <datalist id="remito-clientes-hoy">{clientesHoy.map(c=><option key={c} value={c}/>)}</datalist>
+      </div>
+      <div style={S.formGroup}><label style={S.label}>Domicilio</label><input value={form.domicilio} onChange={e=>set("domicilio",e.target.value)} style={S.input}/></div>
+      <div style={S.formGroup}><label style={S.label}>Teléfono</label><input value={form.telefono} onChange={e=>set("telefono",e.target.value)} style={S.input}/></div>
+      <div style={S.formGroup}><label style={S.label}>Cliente N°</label><input value={form.clienteNumero} onChange={e=>set("clienteNumero",e.target.value)} style={S.input}/></div>
+      <div style={{...S.formGroup,gridColumn:"1/-1"}}><label style={S.label}>Observaciones</label><input value={form.observaciones} onChange={e=>set("observaciones",e.target.value)} style={S.input}/></div>
+
+      <div style={S.formGroup}><label style={S.label}>Producto *</label>{concreteTypes.length>0?<select value={form.producto} onChange={e=>set("producto",e.target.value)} style={S.input}><option value="">— Seleccionar —</option>{concreteTypes.map(c=><option key={c} value={c}>{c}</option>)}</select>:<input value={form.producto} onChange={e=>set("producto",e.target.value)} style={S.input} placeholder="Ej: H-25"/>}</div>
+      <div style={S.formGroup}><label style={S.label}>Cantidad (m³)</label><input type="number" min="0" step="0.01" value={form.cantidad} onChange={e=>set("cantidad",e.target.value)} style={S.input}/></div>
+      <div style={S.formGroup}><label style={S.label}>Asentamiento (cm)</label><input value={form.asentamiento} onChange={e=>set("asentamiento",e.target.value)} style={S.input}/></div>
+      <div style={S.formGroup}><label style={S.label}>Aditivo — Tipo</label><input value={form.aditivoTipo} onChange={e=>set("aditivoTipo",e.target.value)} style={S.input}/></div>
+      <div style={S.formGroup}><label style={S.label}>Aditivo — Cantidad</label><input value={form.aditivoCantidad} onChange={e=>set("aditivoCantidad",e.target.value)} style={S.input}/></div>
+      <div style={S.formGroup}><label style={S.label}>Agua agregada en obra (L)</label><input value={form.aguaAgregada} onChange={e=>set("aguaAgregada",e.target.value)} style={S.input} placeholder="— (dejar vacío si no se agregó)"/></div>
+
+      <div style={S.formGroup}><label style={S.label}>Camión</label><select value={form.camion} onChange={e=>set("camion",e.target.value)} style={S.input}>{trucks.length===0&&<option value="">— Sin camiones cargados —</option>}{trucks.map(t=><option key={t} value={t}>{t}</option>)}</select></div>
+      <div style={S.formGroup}><label style={S.label}>Patente</label><input value={patente} readOnly style={{...S.input,opacity:.7}} placeholder="— sin asignar —"/></div>
+      <div style={S.formGroup}><label style={S.label}>Chofer</label><select value={form.chofer} onChange={e=>set("chofer",e.target.value)} style={S.input}>{choferes.length===0&&<option value="">— Sin choferes cargados —</option>}{choferes.map(c=><option key={c} value={c}>{c}</option>)}</select></div>
+      <div style={S.formGroup}><label style={S.label}>Confeccionó</label><input value={form.confeccionadoPor} onChange={e=>set("confeccionadoPor",e.target.value)} style={S.input}/></div>
+
+      <div style={{...S.formGroup,gridColumn:"1/-1"}}><label style={S.label}>Firma y aclaración</label><input value={form.firmaAclaracion} onChange={e=>set("firmaAclaracion",e.target.value)} style={S.input} placeholder="Nombre de quien recibe"/></div>
+      <div style={{...S.formGroup,gridColumn:"1/-1"}}><label style={S.label}>Observaciones finales</label><textarea value={form.observacionesFinal} onChange={e=>set("observacionesFinal",e.target.value)} style={{...S.input,minHeight:52,resize:"vertical"}}/></div>
+    </div>
+    <div style={S.modalFooter}><button onClick={onClose} style={S.btnSecondary}>Cancelar</button><button onClick={handleSubmit} disabled={!canSave} style={{...S.btnPrimary,opacity:canSave?1:.45,cursor:canSave?"pointer":"not-allowed"}}>{saving?"Guardando…":"Guardar e imprimir"}</button></div>
+  </div></div>);
+}
 
 const C={bg:"#0F1117",sidebar:"#161820",panel:"#1C1F2E",border:"#2A2D3E",text:"#E8EAF0",muted:"#6B7280",accent:"#4F8EF7"};
 const S={app:{display:"flex",height:"100vh",background:C.bg,fontFamily:"'IBM Plex Sans','Segoe UI',sans-serif",color:C.text,overflow:"hidden"},sidebar:{width:220,background:C.sidebar,borderRight:`1px solid ${C.border}`,display:"flex",flexDirection:"column",padding:"20px 0",flexShrink:0},sidebarLogo:{display:"flex",alignItems:"center",gap:10,padding:"0 20px 24px",borderBottom:`1px solid ${C.border}`},logoIcon:{fontSize:28,color:C.accent,lineHeight:1},logoTitle:{fontSize:16,fontWeight:700,letterSpacing:1},logoSub:{fontSize:10,color:C.muted,textTransform:"uppercase",letterSpacing:1},nav:{padding:"16px 12px",flex:1,display:"flex",flexDirection:"column",gap:4},navItem:{display:"flex",alignItems:"center",gap:10,padding:"9px 12px",borderRadius:8,border:"none",background:"transparent",color:C.muted,fontSize:14,cursor:"pointer",textAlign:"left"},navItemActive:{background:`${C.accent}22`,color:C.accent,fontWeight:600},navIcon:{fontSize:16,width:20,textAlign:"center"},sidebarFooter:{padding:"16px 16px 0",borderTop:`1px solid ${C.border}`},userBadge:{display:"flex",alignItems:"center",gap:10,marginBottom:12},userAvatar:{width:32,height:32,borderRadius:"50%",background:C.accent,display:"flex",alignItems:"center",justifyContent:"center",fontWeight:700,fontSize:14,flexShrink:0},userName:{fontSize:13,fontWeight:600},userRole:{fontSize:11,color:C.muted},logoutBtn:{width:"100%",padding:"8px",background:"transparent",border:`1px solid ${C.border}`,color:C.muted,borderRadius:6,cursor:"pointer",fontSize:12},main:{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"},header:{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"20px 28px",borderBottom:`1px solid ${C.border}`,background:C.sidebar,flexShrink:0},pageTitle:{fontSize:20,fontWeight:700,margin:0},pageDate:{fontSize:12,color:C.muted,marginTop:2},content:{flex:1,overflow:"auto",padding:24},statsGrid:{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:16,marginBottom:24},statCard:{background:C.panel,border:`1px solid ${C.border}`,borderRadius:12,padding:20,textAlign:"center"},statIcon:{fontSize:22,marginBottom:8},statValue:{fontSize:32,fontWeight:800,lineHeight:1},statLabel:{fontSize:12,color:C.muted,marginTop:4,textTransform:"uppercase",letterSpacing:.5},dashGrid:{display:"grid",gridTemplateColumns:"1fr 1fr",gap:20},panel:{background:C.panel,border:`1px solid ${C.border}`,borderRadius:12,padding:20},panelTitle:{fontSize:13,fontWeight:700,color:C.muted,textTransform:"uppercase",letterSpacing:1,margin:"0 0 14px"},empty:{color:C.muted,textAlign:"center",padding:"24px 0",fontSize:14},filters:{display:"flex",gap:12,marginBottom:20,flexWrap:"wrap"},select:{background:C.panel,border:`1px solid ${C.border}`,color:C.text,padding:"8px 12px",borderRadius:8,fontSize:13,cursor:"pointer"},turnCard:{background:C.panel,border:`1px solid ${C.border}`,borderRadius:12,padding:16},turnCardTop:{display:"flex",justifyContent:"space-between",alignItems:"flex-start"},statusDot:{width:10,height:10,borderRadius:"50%",flexShrink:0,marginTop:4},turnClient:{fontWeight:700,fontSize:15},turnMeta:{fontSize:12,color:C.muted,marginTop:2},turnDetails:{display:"flex",flexWrap:"wrap",gap:"6px 16px",marginTop:12,fontSize:13,color:C.muted},turnActions:{display:"flex",gap:8,marginTop:14,flexWrap:"wrap"},badge:{fontSize:11,fontWeight:700,padding:"3px 10px",borderRadius:20,letterSpacing:.3,whiteSpace:"nowrap"},truckRow:{display:"flex",alignItems:"center",gap:12,padding:"10px 0",borderBottom:`1px solid ${C.border}`},truckIcon:{fontSize:20},truckName:{fontSize:14,fontWeight:600},truckClient:{fontSize:12,color:C.muted},truckGrid:{display:"grid",gridTemplateColumns:"repeat(2,1fr)",gap:20},truckCard:{background:C.panel,border:`1px solid ${C.border}`,borderRadius:12,padding:20},truckCardHeader:{display:"flex",gap:14,alignItems:"center",marginBottom:16},truckCardName:{fontSize:18,fontWeight:800,marginBottom:6},truckActive:{background:`${C.border}88`,borderRadius:8,padding:12,marginBottom:14},truckActiveLabel:{fontSize:11,color:C.muted,textTransform:"uppercase",letterSpacing:.5,marginBottom:4},truckActiveClient:{fontWeight:700,fontSize:14},truckActiveMeta:{fontSize:12,color:C.muted,marginTop:2},truckStats:{display:"flex",gap:20},truckStat:{textAlign:"center",fontSize:12,color:C.muted},truckStatNum:{display:"block",fontSize:22,fontWeight:800,color:C.text},plantCard:{flex:1,minWidth:360,background:C.panel,border:`1px solid ${C.border}`,borderRadius:12,padding:24},plantHeader:{display:"flex",gap:16,alignItems:"center",marginBottom:20},plantName:{fontSize:22,fontWeight:800},plantStatus:{fontSize:13,color:C.muted,marginTop:4},plantStats:{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12,marginBottom:20},plantStat:{background:`${C.border}55`,borderRadius:8,padding:12,textAlign:"center"},plantStatNum:{fontSize:24,fontWeight:800},plantStatLabel:{fontSize:11,color:C.muted,marginTop:2},btnPrimary:{background:C.accent,color:"#fff",border:"none",padding:"10px 20px",borderRadius:8,cursor:"pointer",fontWeight:700,fontSize:14},btnSecondary:{background:"transparent",color:C.muted,border:`1px solid ${C.border}`,padding:"8px 16px",borderRadius:8,cursor:"pointer",fontSize:13},btnAdvance:{background:`${C.accent}22`,color:C.accent,border:`1px solid ${C.accent}55`,padding:"7px 14px",borderRadius:8,cursor:"pointer",fontWeight:700,fontSize:13},btnDanger:{background:"#EF444422",color:"#EF4444",border:"1px solid #EF444455",padding:"7px 14px",borderRadius:8,cursor:"pointer",fontSize:13},modalOverlay:{position:"fixed",inset:0,background:"#000A",display:"flex",alignItems:"center",justifyContent:"center",zIndex:100},modal:{background:C.panel,border:`1px solid ${C.border}`,borderRadius:16,width:"90%",maxWidth:560,maxHeight:"90vh",overflow:"auto"},modalHeader:{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"20px 24px",borderBottom:`1px solid ${C.border}`},modalTitle:{fontSize:18,fontWeight:800,margin:0},modalClose:{background:"transparent",border:"none",color:C.muted,fontSize:18,cursor:"pointer"},formGrid:{display:"grid",gridTemplateColumns:"1fr 1fr",gap:16,padding:24},formGroup:{display:"flex",flexDirection:"column",gap:6},label:{fontSize:12,fontWeight:700,color:C.muted,textTransform:"uppercase",letterSpacing:.5},input:{background:C.bg,border:`1px solid ${C.border}`,color:C.text,padding:"9px 12px",borderRadius:8,fontSize:14,outline:"none"},modalFooter:{display:"flex",justifyContent:"flex-end",gap:10,padding:"16px 24px",borderTop:`1px solid ${C.border}`},loginBg:{minHeight:"100vh",display:"flex",alignItems:"center",justifyContent:"center",background:C.bg,fontFamily:"'IBM Plex Sans','Segoe UI',sans-serif"},loginCard:{background:C.panel,border:`1px solid ${C.border}`,borderRadius:20,padding:40,width:420,textAlign:"center"},loginLogo:{fontSize:48,color:C.accent,marginBottom:8},loginTitle:{fontSize:28,fontWeight:900,margin:"0 0 6px",color:C.text},loginSub:{fontSize:13,color:C.muted,marginBottom:28},loginLabel:{fontSize:12,fontWeight:700,color:C.muted,textTransform:"uppercase",letterSpacing:1,marginBottom:14},loginUsers:{display:"flex",flexDirection:"column",gap:8,marginBottom:20},loginUser:{display:"flex",alignItems:"center",gap:12,padding:"12px 16px",borderRadius:10,border:`1px solid ${C.border}`,background:"transparent",color:C.text,cursor:"pointer",fontSize:14},loginUserActive:{border:`1px solid ${C.accent}`,background:`${C.accent}22`,color:C.accent},loginUserAvatar:{width:28,height:28,borderRadius:"50%",background:C.accent,display:"flex",alignItems:"center",justifyContent:"center",fontWeight:700,fontSize:13,color:"#fff"},calDayStrip:{display:"flex",gap:6,overflowX:"auto",paddingBottom:4},calDayBtn:{display:"flex",flexDirection:"column",alignItems:"center",gap:3,padding:"10px 12px",borderRadius:10,border:`1px solid ${C.border}`,background:C.panel,color:C.muted,cursor:"pointer",minWidth:56,flexShrink:0},calDayBtnActive:{background:C.accent,border:`1px solid ${C.accent}`,color:"#fff"},calDayBtnToday:{border:`1px solid ${C.accent}`,color:C.accent},calDot:{width:5,height:5,borderRadius:"50%",background:C.accent},calEventBtn:{border:"none",borderRadius:4,padding:"2px 7px",cursor:"pointer",fontWeight:700,background:`${C.border}`,color:C.muted},settingsRow:{display:"flex",alignItems:"center",gap:8,padding:"8px 0",borderBottom:`1px solid ${C.border}`},btnSave:{background:"#10B98122",color:"#10B981",border:"1px solid #10B98155",padding:"5px 10px",borderRadius:6,cursor:"pointer",fontWeight:700,fontSize:12},btnCancelSm:{background:"transparent",color:C.muted,border:`1px solid ${C.border}`,padding:"5px 10px",borderRadius:6,cursor:"pointer",fontSize:12},btnEdit:{background:`${C.accent}22`,color:C.accent,border:`1px solid ${C.accent}44`,padding:"5px 10px",borderRadius:6,cursor:"pointer",fontSize:12,whiteSpace:"nowrap"},btnDangerSm:{background:"#EF444422",color:"#EF4444",border:"1px solid #EF444444",padding:"5px 8px",borderRadius:6,cursor:"pointer",fontSize:12},btnAddItem:{marginTop:10,background:"transparent",color:C.accent,border:`1px dashed ${C.accent}88`,padding:"7px 14px",borderRadius:8,cursor:"pointer",fontSize:13,width:"100%"},tabBtn:{padding:"8px 16px",borderRadius:"8px 8px 0 0",border:"none",background:"transparent",color:C.muted,cursor:"pointer",fontSize:13,fontWeight:600},tabBtnActive:{background:C.panel,color:C.accent,borderBottom:`2px solid ${C.accent}`}};
