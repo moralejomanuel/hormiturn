@@ -212,6 +212,26 @@ function printDayReport(turns,day) {
   const w=window.open("","_blank"); w.document.write(html); w.document.close(); w.focus(); setTimeout(()=>w.print(),500);
 }
 
+// Exporta lo realmente producido (turnos completados) de un día como CSV.
+// dayTurns ya debe venir filtrado por día (y, si corresponde, por planta).
+function exportDayCSV(dayTurns,day,plantLabel) {
+  const completed=dayTurns.filter(t=>t.status==="completado").sort((a,b)=>a.scheduledAt-b.scheduledAt);
+  const esc=v=>`"${String(v??"").replace(/"/g,'""')}"`;
+  const numAR=n=>String(n).replace(".",",");
+  const headers=["Fecha","Planta","Cliente","Hormigón","m³","Camiones","Horario","Operador","Destino"];
+  const rows=completed.map(t=>[fmtDate(t.scheduledAt),t.plant,t.client,t.concreteType||"",numAR(t.m3),(t.trucks||[]).join(" | "),`${fmtTime(t.scheduledAt)}${t.endAt?` - ${fmtTime(t.endAt)}`:""}`,t.operator,t.destination]);
+  const totalM3=completed.reduce((s,t)=>s+t.m3,0);
+  rows.push(["","","","TOTAL",numAR(totalM3),"","","",""]);
+  const csv=[headers,...rows].map(r=>r.map(esc).join(";")).join("\r\n");
+  const blob=new Blob(["\uFEFF"+csv],{type:"text/csv;charset=utf-8;"});
+  const url=URL.createObjectURL(blob);
+  const a=document.createElement("a");
+  a.href=url;
+  a.download=`resumen_${day}${plantLabel&&plantLabel!=="all"?"_"+plantLabel.replace(/\s+/g,"-"):""}.csv`;
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
 // ── MAPA ──────────────────────────────────────────────────────────────────────
 function MapView({turns,infotrakConfig,plantsGeo,onUpdateStatus}) {
   const mapRef=useRef(null); const mapInstance=useRef(null); const markersRef=useRef({}); const circlesRef=useRef({});
@@ -359,12 +379,14 @@ export default function App() {
   const [filterTruck,setFilterTruck]=useState("all");
   const [calendarDay,setCalendarDay]=useState(dayKey(Date.now()));
   const [dashDay,setDashDay]=useState(dayKey(Date.now()));
+  const [dashPlantFilter,setDashPlantFilter]=useState("all");
   const [now,setNow]=useState(Date.now());
   const [emailStatus,setEmailStatus]=useState(null);
   const [remitos,setRemitos]=useState([]);
   const [choferes,setChoferes]=useState([]);
   const [patentes,setPatentes]=useState({});
   const [showRemitoForm,setShowRemitoForm]=useState(false);
+  const [permissions,setPermissions]=useState({});
 
   useEffect(()=>{
     async function load(){
@@ -381,6 +403,7 @@ export default function App() {
         if(row.key==="user_emails") setUserEmails(row.value||{});
         if(row.key==="choferes") setChoferes(row.value);
         if(row.key==="patentes") setPatentes(row.value||{});
+        if(row.key==="permissions") setPermissions(row.value||{});
       });}
       const {data:dbTurns}=await supabase.from("turns").select("*").order("scheduled_at");
       if(dbTurns) setTurns(dbTurns.map(dbToTurn));
@@ -404,6 +427,7 @@ export default function App() {
     const ch=supabase.channel("remitos-rt")
       .on("postgres_changes",{event:"INSERT",schema:"public",table:"remitos"},p=>setRemitos(prev=>prev.some(r=>r.numero===p.new.numero)?prev:[p.new,...prev]))
       .on("postgres_changes",{event:"UPDATE",schema:"public",table:"remitos"},p=>setRemitos(prev=>prev.map(r=>r.numero===p.new.numero?p.new:r)))
+      .on("postgres_changes",{event:"DELETE",schema:"public",table:"remitos"},p=>setRemitos(prev=>prev.filter(r=>r.numero!==p.old.numero)))
       .subscribe();
     return()=>supabase.removeChannel(ch);
   },[]);
@@ -421,12 +445,20 @@ export default function App() {
         if(row.key==="user_emails") setUserEmails(row.value||{});
         if(row.key==="choferes") setChoferes(row.value);
         if(row.key==="patentes") setPatentes(row.value||{});
+        if(row.key==="permissions") setPermissions(row.value||{});
       })
       .subscribe();
     return()=>supabase.removeChannel(ch);
   },[]);
 
   useEffect(()=>{const i=setInterval(()=>setNow(Date.now()),30000);return()=>clearInterval(i);},[]);
+
+  useEffect(()=>{
+    const perm=permissions[currentUser];
+    if(perm&&Array.isArray(perm.allowedViews)&&perm.allowedViews.length&&!perm.allowedViews.includes(view)){
+      setView(perm.allowedViews[0]);
+    }
+  },[currentUser,permissions,view]);
 
   async function saveConfig(key,value,extra={}){await supabase.from("config").update({value,...extra}).eq("key",key);}
 
@@ -468,10 +500,11 @@ export default function App() {
     printRemito(inserted);
     return inserted;
   }
+  async function handleDeleteRemito(numero){await supabase.from("remitos").delete().eq("numero",numero);}
 
   async function renamePlant(o,n){const next=plants.map(x=>x===o?n:x);setPlants(next);await saveConfig("plants",next);for(const t of turns.filter(t=>t.plant===o))await supabase.from("turns").update({plant:n}).eq("id",t.id);}
   async function renameTruck(o,n){const next=trucks.map(x=>x===o?n:x);setTrucks(next);await saveConfig("trucks",next);for(const t of turns.filter(t=>(t.trucks||[]).includes(o)))await supabase.from("turns").update({trucks:(t.trucks||[]).map(x=>x===o?n:x)}).eq("id",t.id);if(patentes[o]!==undefined){const nextP={...patentes};nextP[n]=nextP[o];delete nextP[o];setPatentes(nextP);await saveConfig("patentes",nextP);}for(const r of remitos.filter(r=>r.camion===o))await supabase.from("remitos").update({camion:n}).eq("numero",r.numero);}
-  async function renameUser(o,n){const next=users.map(x=>x===o?n:x);const nextPw={...passwords};if(nextPw[o]!==undefined){nextPw[n]=nextPw[o];delete nextPw[o];}const nextEm={...userEmails};if(nextEm[o]!==undefined){nextEm[n]=nextEm[o];delete nextEm[o];}setUsers(next);setPasswords(nextPw);setUserEmails(nextEm);await saveConfig("users",next,{passwords:nextPw});await supabase.from("config").update({value:nextEm}).eq("key","user_emails");for(const t of turns.filter(t=>t.operator===o))await supabase.from("turns").update({operator:n}).eq("id",t.id);if(currentUser===o)setCurrentUser(n);}
+  async function renameUser(o,n){const next=users.map(x=>x===o?n:x);const nextPw={...passwords};if(nextPw[o]!==undefined){nextPw[n]=nextPw[o];delete nextPw[o];}const nextEm={...userEmails};if(nextEm[o]!==undefined){nextEm[n]=nextEm[o];delete nextEm[o];}setUsers(next);setPasswords(nextPw);setUserEmails(nextEm);await saveConfig("users",next,{passwords:nextPw});await supabase.from("config").update({value:nextEm}).eq("key","user_emails");for(const t of turns.filter(t=>t.operator===o))await supabase.from("turns").update({operator:n}).eq("id",t.id);if(currentUser===o)setCurrentUser(n);if(permissions[o]!==undefined){const nextPerm={...permissions};nextPerm[n]=nextPerm[o];delete nextPerm[o];setPermissions(nextPerm);await saveConfig("permissions",nextPerm);}}
   async function renameConcreteType(o,n){const next=concreteTypes.map(x=>x===o?n:x);setConcreteTypes(next);await saveConfig("concrete_types",next);for(const t of turns.filter(t=>t.concreteType===o))await supabase.from("turns").update({concrete_type:n}).eq("id",t.id);}
   async function addPlant(v){if(plants.includes(v))return;const next=[...plants,v];setPlants(next);await saveConfig("plants",next);}
   async function addTruck(v){if(trucks.includes(v))return;const next=[...trucks,v];setTrucks(next);await saveConfig("trucks",next);}
@@ -483,7 +516,8 @@ export default function App() {
   async function removeChofer(v){const next=choferes.filter(x=>x!==v);setChoferes(next);await saveConfig("choferes",next);}
   async function renameChofer(o,n){const next=choferes.map(x=>x===o?n:x);setChoferes(next);await saveConfig("choferes",next);for(const r of remitos.filter(r=>r.chofer===o))await supabase.from("remitos").update({chofer:n}).eq("numero",r.numero);}
   async function setPatente(camion,patente){const next={...patentes,[camion]:patente};setPatentes(next);await saveConfig("patentes",next);}
-  async function removeUser(v){const next=users.filter(x=>x!==v);const nextPw={...passwords};delete nextPw[v];const nextEm={...userEmails};delete nextEm[v];setUsers(next);setPasswords(nextPw);setUserEmails(nextEm);await saveConfig("users",next,{passwords:nextPw});await supabase.from("config").update({value:nextEm}).eq("key","user_emails");}
+  async function setUserPermissions(user,perm){const next={...permissions};if(perm)next[user]=perm;else delete next[user];setPermissions(next);await saveConfig("permissions",next);}
+  async function removeUser(v){const next=users.filter(x=>x!==v);const nextPw={...passwords};delete nextPw[v];const nextEm={...userEmails};delete nextEm[v];setUsers(next);setPasswords(nextPw);setUserEmails(nextEm);await saveConfig("users",next,{passwords:nextPw});await supabase.from("config").update({value:nextEm}).eq("key","user_emails");if(permissions[v]!==undefined){const nextPerm={...permissions};delete nextPerm[v];setPermissions(nextPerm);await saveConfig("permissions",nextPerm);}}
   async function removeConcreteType(v){const next=concreteTypes.filter(x=>x!==v);setConcreteTypes(next);await saveConfig("concrete_types",next);}
   async function setPassword(user,pw){const nextPw={...passwords,[user]:pw};setPasswords(nextPw);await saveConfig("users",users,{passwords:nextPw});}
   async function setUserEmail(user,email){const next={...userEmails,[user]:email};setUserEmails(next);await supabase.from("config").update({value:next}).eq("key","user_emails");}
@@ -497,21 +531,26 @@ export default function App() {
   }
 
   const dashDayTurns=turns.filter(t=>dayKey(t.scheduledAt)===dashDay);
-  const stats={total:dashDayTurns.length,active:dashDayTurns.filter(t=>!["completado","cancelado"].includes(t.status)).length,completed:dashDayTurns.filter(t=>t.status==="completado").length,m3Today:dashDayTurns.filter(t=>t.status==="completado").reduce((s,t)=>s+t.m3,0)};
+  const dashDayTurnsFiltered=dashPlantFilter==="all"?dashDayTurns:dashDayTurns.filter(t=>t.plant===dashPlantFilter);
+  const stats={total:dashDayTurnsFiltered.length,active:dashDayTurnsFiltered.filter(t=>!["completado","cancelado"].includes(t.status)).length,completed:dashDayTurnsFiltered.filter(t=>t.status==="completado").length,m3Today:dashDayTurnsFiltered.filter(t=>t.status==="completado").reduce((s,t)=>s+t.m3,0)};
   const filteredTurns=turns.filter(t=>{if(filterStatus!=="all"&&t.status!==filterStatus)return false;if(filterPlant!=="all"&&t.plant!==filterPlant)return false;if(filterTruck!=="all"&&!(t.trucks||[]).includes(filterTruck))return false;return true;});
 
   if(loading)return(<div style={{...S.loginBg,flexDirection:"column",gap:16}}><div style={{fontSize:48,color:C.accent}}>⬡</div><div style={{fontSize:18,color:C.text,fontWeight:700}}>Cargando HormiTurn…</div><div style={{fontSize:13,color:C.muted}}>Conectando con la base de datos</div></div>);
   if(!currentUser)return <LoginScreen users={users} passwords={passwords} onLogin={handleLogin}/>;
+
+  const myPerm=permissions[currentUser];
+  const allowedViews=(myPerm&&Array.isArray(myPerm.allowedViews)&&myPerm.allowedViews.length)?myPerm.allowedViews:null;
+  const fullAccess=!allowedViews;
 
   return(
     <div style={S.app}>
       <aside style={S.sidebar}>
         <div style={S.sidebarLogo}><div style={S.logoIcon}>⬡</div><div><div style={S.logoTitle}>HormiTurn</div><div style={S.logoSub}>Gestión de Despacho</div></div></div>
         <nav style={S.nav}>
-          {[{key:"dashboard",icon:"◈",label:"Dashboard"},{key:"turns",icon:"≡",label:"Turnos"},{key:"remitos",icon:"🧾",label:"Remitos"},{key:"calendar",icon:"▦",label:"Calendario"},{key:"map",icon:"🗺",label:"Mapa GPS"},{key:"trucks",icon:"◉",label:"Camiones"},{key:"plants",icon:"⬟",label:"Plantas"}].map(item=>(
+          {[{key:"dashboard",icon:"◈",label:"Dashboard"},{key:"turns",icon:"≡",label:"Turnos"},{key:"remitos",icon:"🧾",label:"Remitos"},{key:"calendar",icon:"▦",label:"Calendario"},{key:"map",icon:"🗺",label:"Mapa GPS"},{key:"trucks",icon:"◉",label:"Camiones"},{key:"plants",icon:"⬟",label:"Plantas"}].filter(item=>!allowedViews||allowedViews.includes(item.key)).map(item=>(
             <button key={item.key} onClick={()=>setView(item.key)} style={{...S.navItem,...(view===item.key?S.navItemActive:{})}}><span style={S.navIcon}>{item.icon}</span>{item.label}</button>
           ))}
-          <button onClick={()=>setShowSettings(true)} style={{...S.navItem,marginTop:"auto"}}><span style={S.navIcon}>⚙</span>Configuración</button>
+          {(!allowedViews||allowedViews.includes("settings"))&&<button onClick={()=>setShowSettings(true)} style={{...S.navItem,marginTop:"auto"}}><span style={S.navIcon}>⚙</span>Configuración</button>}
         </nav>
         <div style={S.sidebarFooter}>
           <div style={S.userBadge}><div style={S.userAvatar}>{currentUser[0]}</div><div><div style={S.userName}>{currentUser}</div><div style={S.userRole}>En línea</div></div></div>
@@ -526,29 +565,34 @@ export default function App() {
           </div>
           <div style={{display:"flex",gap:10,alignItems:"center"}}>
             {view==="dashboard"&&<>
+              <select value={dashPlantFilter} onChange={e=>setDashPlantFilter(e.target.value)} style={{...S.select,fontSize:12}}>
+                <option value="all">Todas las plantas</option>
+                {plants.map(p=><option key={p} value={p}>{p}</option>)}
+              </select>
               <button onClick={handleSendEmail} disabled={emailStatus==="sending"} style={{...S.btnSecondary,fontSize:12,padding:"8px 14px"}}>
                 {emailStatus==="sending"?"Enviando…":"📧 Enviar resumen mañana"}
               </button>
               {emailStatus&&emailStatus!=="sending"&&<span style={{fontSize:12,color:emailStatus.ok?"#10B981":"#EF4444"}}>{emailStatus.ok?"✓":"✗"} {emailStatus.msg}</span>}
-              <button onClick={()=>printDayReport(turns,dashDay)} style={S.btnSecondary}>🖨 Imprimir</button>
+              <button onClick={()=>exportDayCSV(dashDayTurnsFiltered,dashDay,dashPlantFilter)} style={S.btnSecondary}>📊 Exportar CSV</button>
+              <button onClick={()=>printDayReport(dashDayTurnsFiltered,dashDay)} style={S.btnSecondary}>🖨 Imprimir</button>
             </>}
             {view==="calendar"&&<button onClick={()=>printDayReport(turns,calendarDay)} style={S.btnSecondary}>🖨 Imprimir</button>}
             {(view==="turns"||view==="calendar")&&<button onClick={()=>{setEditingTurn(null);setShowForm(true);}} style={S.btnPrimary}>+ Nuevo Turno</button>}
             {view==="remitos"&&<button onClick={()=>setShowRemitoForm(true)} style={S.btnPrimary}>+ Nuevo remito</button>}
           </div>
         </header>
-        <div style={S.content}>
-          {view==="dashboard"&&<DashboardView stats={stats} turns={dashDayTurns} allTurns={turns} trucks={trucks} onAdvance={handleAdvance} dashDay={dashDay} setDashDay={setDashDay}/>}
+        <div style={view==="calendar"?{...S.content,overflow:"hidden",display:"flex",flexDirection:"column"}:S.content}>
+          {view==="dashboard"&&<DashboardView stats={stats} turns={dashDayTurnsFiltered} allTurns={turns} trucks={trucks} onAdvance={handleAdvance} dashDay={dashDay} setDashDay={setDashDay}/>}
           {view==="turns"    &&<TurnsView turns={filteredTurns} filterStatus={filterStatus} setFilterStatus={setFilterStatus} filterPlant={filterPlant} setFilterPlant={setFilterPlant} filterTruck={filterTruck} setFilterTruck={setFilterTruck} plants={plants} trucks={trucks} onAdvance={handleAdvance} onEdit={t=>{setEditingTurn(t);setShowForm(true);}} onCancel={handleCancel} onDelete={handleDelete}/>}
           {view==="calendar" &&<CalendarView turns={turns} selectedDay={calendarDay} setSelectedDay={setCalendarDay} onAdvance={handleAdvance} onEdit={t=>{setEditingTurn(t);setShowForm(true);}} onCancel={handleCancel}/>}
           {view==="map"      &&<MapView turns={turns} infotrakConfig={infotrakConfig} plantsGeo={plantsGeo} onUpdateStatus={handleUpdateStatus}/>}
           {view==="trucks"   &&<TrucksView turns={turns} trucks={trucks}/>}
           {view==="plants"   &&<PlantsView turns={turns} plants={plants} trucks={trucks}/>}
-          {view==="remitos"  &&<RemitosView remitos={remitos} onReprint={printRemito}/>}
+          {view==="remitos"  &&<RemitosView remitos={remitos} onReprint={printRemito} onDelete={fullAccess?handleDeleteRemito:null}/>}
         </div>
       </main>
       {showForm&&<TurnForm initial={editingTurn} plants={plants} trucks={trucks} users={users} concreteTypes={concreteTypes} allTurns={turns} currentUser={currentUser} onSave={handleSaveTurn} onClose={()=>{setShowForm(false);setEditingTurn(null);}}/>}
-      {showSettings&&<SettingsModal plants={plants} trucks={trucks} users={users} concreteTypes={concreteTypes} passwords={passwords} userEmails={userEmails} choferes={choferes} patentes={patentes} onRenamePlant={renamePlant} onRenameTruck={renameTruck} onRenameUser={renameUser} onRenameConcreteType={renameConcreteType} onAddPlant={addPlant} onAddTruck={addTruck} onAddUser={addUser} onAddConcreteType={addConcreteType} onRemovePlant={removePlant} onRemoveTruck={removeTruck} onRemoveUser={removeUser} onRemoveConcreteType={removeConcreteType} onSetPassword={setPassword} onSetUserEmail={setUserEmail} onAddChofer={addChofer} onRemoveChofer={removeChofer} onRenameChofer={renameChofer} onSetPatente={setPatente} onClose={()=>setShowSettings(false)}/>}
+      {showSettings&&<SettingsModal plants={plants} trucks={trucks} users={users} concreteTypes={concreteTypes} passwords={passwords} userEmails={userEmails} choferes={choferes} patentes={patentes} permissions={permissions} onRenamePlant={renamePlant} onRenameTruck={renameTruck} onRenameUser={renameUser} onRenameConcreteType={renameConcreteType} onAddPlant={addPlant} onAddTruck={addTruck} onAddUser={addUser} onAddConcreteType={addConcreteType} onRemovePlant={removePlant} onRemoveTruck={removeTruck} onRemoveUser={removeUser} onRemoveConcreteType={removeConcreteType} onSetPassword={setPassword} onSetUserEmail={setUserEmail} onAddChofer={addChofer} onRemoveChofer={removeChofer} onRenameChofer={renameChofer} onSetPatente={setPatente} onSetUserPermissions={setUserPermissions} onClose={()=>setShowSettings(false)}/>}
       {showRemitoForm&&<RemitoForm plants={plants} trucks={trucks} choferes={choferes} patentes={patentes} concreteTypes={concreteTypes} turns={turns} currentUser={currentUser} onSave={handleSaveRemito} onClose={()=>setShowRemitoForm(false)}/>}
       <div id="remito-print-root" className="remito-print-sheet"></div>
     </div>
@@ -565,7 +609,48 @@ function EmailList({users,userEmails,onSetUserEmail}){const [editing,setEditing]
 
 function PatentesList({trucks,patentes,onSetPatente}){const [editing,setEditing]=useState(null);const [val,setVal]=useState("");return(<div><div style={{...S.panelTitle,marginBottom:10}}>Patentes por camión</div><p style={{fontSize:12,color:C.muted,marginBottom:14}}>Se usa para autocompletar la patente en los remitos.</p>{trucks.length===0&&<div style={S.empty}>Agregá camiones primero en la pestaña "Camiones".</div>}{trucks.map((tr,i)=>(<div key={i} style={S.settingsRow}><div style={S.truckIcon}>🚛</div><span style={{flex:1,fontSize:14}}>{tr}</span>{editing===tr?<><input value={val} onChange={e=>setVal(e.target.value)} placeholder="AB123CD" style={{...S.input,width:140,padding:"5px 10px",fontSize:13,textTransform:"uppercase"}} autoFocus onKeyDown={e=>{if(e.key==="Enter"){onSetPatente(tr,val.trim().toUpperCase());setEditing(null);setVal("");}if(e.key==="Escape"){setEditing(null);setVal("");}}}/><button onClick={()=>{onSetPatente(tr,val.trim().toUpperCase());setEditing(null);setVal("");}} style={S.btnSave}>✓</button><button onClick={()=>{setEditing(null);setVal("");}} style={S.btnCancelSm}>✕</button></>:<><span style={{fontSize:12,color:patentes[tr]?"#10B981":C.muted,marginRight:8}}>{patentes[tr]||"Sin patente"}</span><button onClick={()=>{setEditing(tr);setVal(patentes[tr]||"");}} style={S.btnEdit}>{patentes[tr]?"Cambiar":"Asignar"}</button></>}</div>))}</div>);}
 
-function SettingsModal({plants,trucks,users,concreteTypes,passwords,userEmails,choferes,patentes,onRenamePlant,onRenameTruck,onRenameUser,onRenameConcreteType,onAddPlant,onAddTruck,onAddUser,onAddConcreteType,onRemovePlant,onRemoveTruck,onRemoveUser,onRemoveConcreteType,onSetPassword,onSetUserEmail,onAddChofer,onRemoveChofer,onRenameChofer,onSetPatente,onClose}){const [tab,setTab]=useState("plants");return(<div style={S.modalOverlay}><div style={{...S.modal,maxWidth:560}}><div style={S.modalHeader}><h2 style={S.modalTitle}>⚙ Configuración</h2><button onClick={onClose} style={S.modalClose}>✕</button></div><div style={{display:"flex",gap:4,padding:"14px 24px 0",borderBottom:`1px solid ${C.border}`,flexWrap:"wrap"}}>{[["plants","🏭 Plantas"],["trucks","🚛 Camiones"],["patentes","🔖 Patentes"],["users","👤 Operadores"],["choferes","🧑‍✈️ Choferes"],["concrete","🪨 Hormigón"],["passwords","🔒 Contraseñas"],["emails","📧 Emails"]].map(([k,l])=>(<button key={k} onClick={()=>setTab(k)} style={{...S.tabBtn,...(tab===k?S.tabBtnActive:{})}}>{l}</button>))}</div><div style={{padding:24,maxHeight:"60vh",overflowY:"auto"}}>{tab==="plants"&&<EditableList items={plants} onRename={onRenamePlant} onAdd={onAddPlant} onRemove={onRemovePlant} label="Plantas" placeholder="Nueva planta…"/>}{tab==="trucks"&&<EditableList items={trucks} onRename={onRenameTruck} onAdd={onAddTruck} onRemove={onRemoveTruck} label="Camiones" placeholder="Nuevo camión…"/>}{tab==="patentes"&&<PatentesList trucks={trucks} patentes={patentes} onSetPatente={onSetPatente}/>}{tab==="users"&&<EditableList items={users} onRename={onRenameUser} onAdd={onAddUser} onRemove={onRemoveUser} label="Operadores" placeholder="Nuevo operador…"/>}{tab==="choferes"&&<EditableList items={choferes} onRename={onRenameChofer} onAdd={onAddChofer} onRemove={onRemoveChofer} label="Choferes" placeholder="Nuevo chofer…"/>}{tab==="concrete"&&<EditableList items={concreteTypes} onRename={onRenameConcreteType} onAdd={onAddConcreteType} onRemove={onRemoveConcreteType} label="Tipos de Hormigón" placeholder="Ej: H-25…"/>}{tab==="passwords"&&<PasswordList users={users} passwords={passwords} onSetPassword={onSetPassword}/>}{tab==="emails"&&<EmailList users={users} userEmails={userEmails} onSetUserEmail={onSetUserEmail}/>}<p style={{fontSize:12,color:C.muted,marginTop:4}}>Los cambios se sincronizan para todos los usuarios.</p></div><div style={S.modalFooter}><button onClick={onClose} style={S.btnPrimary}>Listo</button></div></div></div>);}
+function PermissionsList({users,permissions,onSetUserPermissions}){
+  const VIEWS=[
+    {key:"dashboard",label:"Dashboard"},
+    {key:"turns",label:"Turnos"},
+    {key:"remitos",label:"Remitos"},
+    {key:"calendar",label:"Calendario"},
+    {key:"map",label:"Mapa GPS"},
+    {key:"trucks",label:"Camiones"},
+    {key:"plants",label:"Plantas"},
+    {key:"settings",label:"Configuración"},
+  ];
+  return(<div>
+    <div style={{...S.panelTitle,marginBottom:10}}>Perfiles de acceso</div>
+    <p style={{fontSize:12,color:C.muted,marginBottom:14}}>Por defecto un operador tiene acceso completo (ve todas las pantallas y puede eliminar remitos). Activá el acceso limitado para restringirlo — por ejemplo, un plantista que solo pueda generar remitos.</p>
+    {users.length===0&&<div style={S.empty}>Agregá operadores primero en la pestaña "Operadores".</div>}
+    {users.map((u,i)=>{
+      const perm=permissions[u];
+      const allowed=perm?.allowedViews||[];
+      return(<div key={i} style={{...S.settingsRow,flexDirection:"column",alignItems:"stretch",gap:8}}>
+        <div style={{display:"flex",alignItems:"center",gap:8}}>
+          <div style={S.userAvatar}>{u[0]}</div>
+          <span style={{flex:1,fontSize:14}}>{u}</span>
+          <span style={{fontSize:11,color:perm?"#F59E0B":"#10B981",marginRight:4}}>{perm?"Acceso limitado":"Acceso completo"}</span>
+          <button onClick={()=>onSetUserPermissions(u,perm?null:{allowedViews:["remitos"]})} style={S.btnEdit}>{perm?"Dar acceso completo":"Limitar acceso"}</button>
+        </div>
+        {perm&&<div style={{display:"flex",flexWrap:"wrap",gap:"6px 14px",paddingLeft:40}}>
+          {VIEWS.map(v=>{
+            const checked=allowed.includes(v.key);
+            return(<label key={v.key} style={{display:"flex",alignItems:"center",gap:4,fontSize:12,color:C.muted,cursor:"pointer"}}>
+              <input type="checkbox" checked={checked} onChange={()=>{
+                const next=checked?allowed.filter(x=>x!==v.key):[...allowed,v.key];
+                onSetUserPermissions(u,{allowedViews:next});
+              }}/> {v.label}
+            </label>);
+          })}
+        </div>}
+      </div>);
+    })}
+  </div>);
+}
+
+function SettingsModal({plants,trucks,users,concreteTypes,passwords,userEmails,choferes,patentes,permissions,onRenamePlant,onRenameTruck,onRenameUser,onRenameConcreteType,onAddPlant,onAddTruck,onAddUser,onAddConcreteType,onRemovePlant,onRemoveTruck,onRemoveUser,onRemoveConcreteType,onSetPassword,onSetUserEmail,onAddChofer,onRemoveChofer,onRenameChofer,onSetPatente,onSetUserPermissions,onClose}){const [tab,setTab]=useState("plants");return(<div style={S.modalOverlay}><div style={{...S.modal,maxWidth:560}}><div style={S.modalHeader}><h2 style={S.modalTitle}>⚙ Configuración</h2><button onClick={onClose} style={S.modalClose}>✕</button></div><div style={{display:"flex",gap:4,padding:"14px 24px 0",borderBottom:`1px solid ${C.border}`,flexWrap:"wrap"}}>{[["plants","🏭 Plantas"],["trucks","🚛 Camiones"],["patentes","🔖 Patentes"],["users","👤 Operadores"],["choferes","🧑‍✈️ Choferes"],["concrete","🪨 Hormigón"],["passwords","🔒 Contraseñas"],["emails","📧 Emails"],["permisos","🔑 Perfiles"]].map(([k,l])=>(<button key={k} onClick={()=>setTab(k)} style={{...S.tabBtn,...(tab===k?S.tabBtnActive:{})}}>{l}</button>))}</div><div style={{padding:24,maxHeight:"60vh",overflowY:"auto"}}>{tab==="plants"&&<EditableList items={plants} onRename={onRenamePlant} onAdd={onAddPlant} onRemove={onRemovePlant} label="Plantas" placeholder="Nueva planta…"/>}{tab==="trucks"&&<EditableList items={trucks} onRename={onRenameTruck} onAdd={onAddTruck} onRemove={onRemoveTruck} label="Camiones" placeholder="Nuevo camión…"/>}{tab==="patentes"&&<PatentesList trucks={trucks} patentes={patentes} onSetPatente={onSetPatente}/>}{tab==="users"&&<EditableList items={users} onRename={onRenameUser} onAdd={onAddUser} onRemove={onRemoveUser} label="Operadores" placeholder="Nuevo operador…"/>}{tab==="choferes"&&<EditableList items={choferes} onRename={onRenameChofer} onAdd={onAddChofer} onRemove={onRemoveChofer} label="Choferes" placeholder="Nuevo chofer…"/>}{tab==="concrete"&&<EditableList items={concreteTypes} onRename={onRenameConcreteType} onAdd={onAddConcreteType} onRemove={onRemoveConcreteType} label="Tipos de Hormigón" placeholder="Ej: H-25…"/>}{tab==="passwords"&&<PasswordList users={users} passwords={passwords} onSetPassword={onSetPassword}/>}{tab==="emails"&&<EmailList users={users} userEmails={userEmails} onSetUserEmail={onSetUserEmail}/>}{tab==="permisos"&&<PermissionsList users={users} permissions={permissions} onSetUserPermissions={onSetUserPermissions}/>}<p style={{fontSize:12,color:C.muted,marginTop:4}}>Los cambios se sincronizan para todos los usuarios.</p></div><div style={S.modalFooter}><button onClick={onClose} style={S.btnPrimary}>Listo</button></div></div></div>);}
 
 function DashboardView({stats,turns,allTurns,trucks,onAdvance,dashDay,setDashDay}){const today=dayKey(Date.now());const refDate=new Date();refDate.setHours(0,0,0,0);const weekDays=Array.from({length:15},(_,i)=>{const d=new Date(refDate);d.setDate(d.getDate()+i-7);return dayKey(d.getTime());});const hasAct=k=>allTurns.some(t=>dayKey(t.scheduledAt)===k);const active=turns.filter(t=>!["completado","cancelado"].includes(t.status));return(<div><div style={{...S.panel,marginBottom:20,padding:"14px 16px"}}><div style={{display:"flex",alignItems:"center",gap:8,marginBottom:10}}><span style={{fontSize:13,fontWeight:700,color:C.muted,textTransform:"uppercase",letterSpacing:.5}}>Filtrando por día</span>{dashDay!==today&&<button onClick={()=>setDashDay(today)} style={{...S.btnEdit,fontSize:11,padding:"2px 8px"}}>Hoy</button>}</div><div style={{display:"flex",gap:5,overflowX:"auto",paddingBottom:4}}>{weekDays.map(k=>{const d=parseDay(k);const isSel=k===dashDay;const isToday=k===today;return <button key={k} onClick={()=>setDashDay(k)} style={{...S.calDayBtn,...(isSel?S.calDayBtnActive:{}),...(isToday&&!isSel?S.calDayBtnToday:{}),minWidth:50}}><span style={{fontSize:9,fontWeight:600,textTransform:"uppercase",opacity:.7}}>{d.toLocaleDateString("es-AR",{weekday:"short"})}</span><span style={{fontSize:15,fontWeight:700}}>{String(d.getDate()).padStart(2,"0")}</span>{hasAct(k)&&<div style={{...S.calDot,...(isSel?{background:"#fff"}:{})}}/>}</button>;})}</div></div><div style={S.statsGrid}>{[{label:"Turnos Activos",value:stats.active,icon:"◎",color:"#3B82F6"},{label:"Completados",value:stats.completed,icon:"✓",color:"#10B981"},{label:"m³ Despachados",value:stats.m3Today,icon:"⬡",color:"#8B5CF6"},{label:"Total del día",value:stats.total,icon:"≡",color:"#F59E0B"}].map((s,i)=>(<div key={i} style={S.statCard}><div style={{...S.statIcon,color:s.color}}>{s.icon}</div><div style={S.statValue}>{s.value}</div><div style={S.statLabel}>{s.label}</div></div>))}</div><div style={S.dashGrid}><div style={S.panel}><h2 style={S.panelTitle}>Turnos en Curso</h2>{active.length===0?<div style={S.empty}>Sin turnos activos en este día</div>:active.map(t=><TurnCard key={t.id} turn={t} onAdvance={onAdvance} compact/>)}</div><div style={S.panel}><h2 style={S.panelTitle}>Estado de Camiones</h2>{trucks.map(tr=>{const act=allTurns.find(t=>(t.trucks||[]).includes(tr)&&!["completado","cancelado"].includes(t.status));const cfg=act?STATUS_CONFIG[act.status]:{label:"Libre",color:"#10B981",bg:"#D1FAE5"};return <div key={tr} style={S.truckRow}><div style={S.truckIcon}>🚛</div><div style={{flex:1}}><div style={S.truckName}>{tr}</div>{act&&<div style={S.truckClient}>{act.client} · {act.m3}m³</div>}</div><div style={{...S.badge,background:cfg.bg,color:cfg.color}}>{cfg.label}</div></div>;})}</div></div></div>);}
 
@@ -595,7 +680,7 @@ function TurnCard({turn:t,onAdvance,onEdit,onCancel,onDelete,compact}){
     {compact&&canAdv&&<div style={{marginTop:8}}><button onClick={()=>onAdvance(t.id)} style={S.btnAdvance}>→ {STATUS_CONFIG[STATUS_FLOW[STATUS_FLOW.indexOf(t.status)+1]]?.label}</button></div>}
   </div>);}
 
-function CalendarView({turns,selectedDay,setSelectedDay,onAdvance,onEdit,onCancel}){const today=dayKey(Date.now());const refDate=new Date();refDate.setHours(0,0,0,0);const weekDays=Array.from({length:14},(_,i)=>{const d=new Date(refDate);d.setDate(d.getDate()+i-3);return dayKey(d.getTime());});const dayTurns=turns.filter(t=>dayKey(t.scheduledAt)===selectedDay).sort((a,b)=>a.scheduledAt-b.scheduledAt);const HOUR_H=60,START_H=6,END_H=22,totalH=END_H-START_H;const hours=Array.from({length:totalH+1},(_,i)=>START_H+i);const nowD=new Date();const nowFrac=(nowD.getHours()+nowD.getMinutes()/60-START_H)/totalH;const showNow=selectedDay===today&&nowFrac>=0&&nowFrac<=1;function assignCols(turns){const cols=[];const assigned=turns.map(t=>{const s=new Date(t.scheduledAt);const sm=s.getHours()*60+s.getMinutes();const endTs=t.endAt||t.scheduledAt+3600000;const e=new Date(endTs);const em=e.getHours()*60+e.getMinutes();let col=0;while(cols[col]&&cols[col]>sm)col++;cols[col]=em;return{...t,col,startMin:sm,endMin:em};});return{assigned,totalCols:Math.max(0,...assigned.map(t=>t.col))+1};}const{assigned,totalCols}=assignCols(dayTurns);return(<div style={{display:"flex",flexDirection:"column",gap:16,height:"100%"}}><div style={S.calDayStrip}>{weekDays.map(k=>{const d=parseDay(k);const isSel=k===selectedDay;const isToday=k===today;const hasAct=turns.some(t=>dayKey(t.scheduledAt)===k);return <button key={k} onClick={()=>setSelectedDay(k)} style={{...S.calDayBtn,...(isSel?S.calDayBtnActive:{}),...(isToday&&!isSel?S.calDayBtnToday:{})}}><span style={{fontSize:10,fontWeight:600,textTransform:"uppercase",opacity:.7}}>{d.toLocaleDateString("es-AR",{weekday:"short"})}</span><span style={{fontSize:16,fontWeight:700}}>{String(d.getDate()).padStart(2,"0")}</span>{hasAct&&<div style={{...S.calDot,...(isSel?{background:"#fff"}:{})}}/>}</button>;})}</div><div style={{...S.panel,flex:1,overflow:"hidden",display:"flex",flexDirection:"column"}}><div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}><h2 style={{...S.panelTitle,margin:0}}>{parseDay(selectedDay).toLocaleDateString("es-AR",{weekday:"long",day:"2-digit",month:"long",year:"numeric"})}</h2><span style={{fontSize:13,color:C.muted}}>{dayTurns.length} turno{dayTurns.length!==1?"s":""}</span></div>{dayTurns.length===0?<div style={{...S.empty,flex:1,display:"flex",alignItems:"center",justifyContent:"center"}}>Sin turnos para este día</div>:<div style={{flex:1,overflowY:"auto",position:"relative"}}><div style={{display:"flex",position:"relative",minHeight:totalH*HOUR_H}}><div style={{width:46,flexShrink:0,position:"relative"}}>{hours.map(h=><div key={h} style={{position:"absolute",top:(h-START_H)*HOUR_H-8,right:8,fontSize:11,color:C.muted,userSelect:"none"}}>{String(h).padStart(2,"0")}:00</div>)}</div><div style={{flex:1,position:"relative"}}>{hours.map(h=><div key={h} style={{position:"absolute",top:(h-START_H)*HOUR_H,left:0,right:0,borderTop:`1px solid ${C.border}`,pointerEvents:"none"}}/>)}{hours.slice(0,-1).map(h=><div key={h+"h"} style={{position:"absolute",top:(h-START_H)*HOUR_H+HOUR_H/2,left:0,right:0,borderTop:`1px dashed ${C.border}44`,pointerEvents:"none"}}/>)}{showNow&&<div style={{position:"absolute",top:nowFrac*totalH*HOUR_H,left:0,right:0,borderTop:"2px solid #EF4444",zIndex:10,pointerEvents:"none"}}><div style={{position:"absolute",left:-4,top:-5,width:8,height:8,borderRadius:"50%",background:"#EF4444"}}/></div>}{assigned.map(t=>{const cfg=STATUS_CONFIG[t.status];const topPx=(t.startMin/60-START_H)*HOUR_H;const hPx=Math.max(36,(t.endMin-t.startMin)/60*HOUR_H-4);const cW=100/totalCols;const canAdv=STATUS_FLOW.includes(t.status)&&t.status!=="completado";return <div key={t.id} style={{position:"absolute",top:topPx+2,height:hPx,left:`calc(${t.col*cW}% + 2px)`,width:`calc(${cW}% - 4px)`,background:cfg.bg,border:`1.5px solid ${cfg.color}55`,borderLeft:`4px solid ${cfg.color}`,borderRadius:8,padding:"6px 8px",overflow:"hidden",cursor:"pointer",boxSizing:"border-box",zIndex:2}}><div style={{fontSize:11,fontWeight:800,color:cfg.color}}>{fmtTime(t.scheduledAt)}{t.endAt&&` → ${fmtTime(t.endAt)}`}</div><div style={{fontSize:12,fontWeight:700,color:"#1a1a2e",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{t.client}</div><div style={{fontSize:10,color:"#555",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{(t.trucks||[]).join(", ")} · {t.m3}m³{t.concreteType&&` · ${t.concreteType}`}</div>{hPx>90&&<div style={{display:"flex",gap:4,marginTop:6,flexWrap:"wrap"}}>{canAdv&&<button onClick={e=>{e.stopPropagation();onAdvance(t.id);}} style={{...S.calEventBtn,background:cfg.color,color:"#fff",fontSize:9}}>→ Avanzar</button>}<button onClick={e=>{e.stopPropagation();onEdit(t);}} style={{...S.calEventBtn,fontSize:9}}>✎</button></div>}</div>;})}</div></div></div>}</div>{dayTurns.length>0&&<div style={{...S.panel,maxHeight:220,overflowY:"auto"}}><div style={{...S.panelTitle,marginBottom:10}}>Detalle del día</div>{dayTurns.map(t=><TurnCard key={t.id} turn={t} onAdvance={onAdvance} onEdit={onEdit} onCancel={onCancel} compact/>)}</div>}</div>);}
+function CalendarView({turns,selectedDay,setSelectedDay,onAdvance,onEdit,onCancel}){const [showDetail,setShowDetail]=useState(false);const today=dayKey(Date.now());const refDate=new Date();refDate.setHours(0,0,0,0);const weekDays=Array.from({length:14},(_,i)=>{const d=new Date(refDate);d.setDate(d.getDate()+i-3);return dayKey(d.getTime());});const dayTurns=turns.filter(t=>dayKey(t.scheduledAt)===selectedDay).sort((a,b)=>a.scheduledAt-b.scheduledAt);const HOUR_H=60,START_H=6,END_H=22,totalH=END_H-START_H;const hours=Array.from({length:totalH+1},(_,i)=>START_H+i);const nowD=new Date();const nowFrac=(nowD.getHours()+nowD.getMinutes()/60-START_H)/totalH;const showNow=selectedDay===today&&nowFrac>=0&&nowFrac<=1;function assignCols(turns){const cols=[];const assigned=turns.map(t=>{const s=new Date(t.scheduledAt);const sm=s.getHours()*60+s.getMinutes();const endTs=t.endAt||t.scheduledAt+3600000;const e=new Date(endTs);const em=e.getHours()*60+e.getMinutes();let col=0;while(cols[col]&&cols[col]>sm)col++;cols[col]=em;return{...t,col,startMin:sm,endMin:em};});return{assigned,totalCols:Math.max(0,...assigned.map(t=>t.col))+1};}const{assigned,totalCols}=assignCols(dayTurns);return(<div style={{display:"flex",flexDirection:"column",gap:16,height:"100%"}}><div style={S.calDayStrip}>{weekDays.map(k=>{const d=parseDay(k);const isSel=k===selectedDay;const isToday=k===today;const hasAct=turns.some(t=>dayKey(t.scheduledAt)===k);return <button key={k} onClick={()=>setSelectedDay(k)} style={{...S.calDayBtn,...(isSel?S.calDayBtnActive:{}),...(isToday&&!isSel?S.calDayBtnToday:{})}}><span style={{fontSize:10,fontWeight:600,textTransform:"uppercase",opacity:.7}}>{d.toLocaleDateString("es-AR",{weekday:"short"})}</span><span style={{fontSize:16,fontWeight:700}}>{String(d.getDate()).padStart(2,"0")}</span>{hasAct&&<div style={{...S.calDot,...(isSel?{background:"#fff"}:{})}}/>}</button>;})}</div><div style={{...S.panel,flex:1,overflow:"hidden",display:"flex",flexDirection:"column"}}><div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}><h2 style={{...S.panelTitle,margin:0}}>{parseDay(selectedDay).toLocaleDateString("es-AR",{weekday:"long",day:"2-digit",month:"long",year:"numeric"})}</h2><div style={{display:"flex",alignItems:"center",gap:12}}><span style={{fontSize:13,color:C.muted}}>{dayTurns.length} turno{dayTurns.length!==1?"s":""}</span>{dayTurns.length>0&&<button onClick={()=>setShowDetail(v=>!v)} style={{...S.btnEdit,fontSize:11,padding:"3px 10px"}}>{showDetail?"Ocultar lista":"Ver en lista"}</button>}</div></div>{dayTurns.length===0?<div style={{...S.empty,flex:1,display:"flex",alignItems:"center",justifyContent:"center"}}>Sin turnos para este día</div>:<div style={{flex:1,overflowY:"auto",position:"relative"}}><div style={{display:"flex",position:"relative",minHeight:totalH*HOUR_H}}><div style={{width:46,flexShrink:0,position:"relative"}}>{hours.map(h=><div key={h} style={{position:"absolute",top:(h-START_H)*HOUR_H-8,right:8,fontSize:11,color:C.muted,userSelect:"none"}}>{String(h).padStart(2,"0")}:00</div>)}</div><div style={{flex:1,position:"relative"}}>{hours.map(h=><div key={h} style={{position:"absolute",top:(h-START_H)*HOUR_H,left:0,right:0,borderTop:`1px solid ${C.border}`,pointerEvents:"none"}}/>)}{hours.slice(0,-1).map(h=><div key={h+"h"} style={{position:"absolute",top:(h-START_H)*HOUR_H+HOUR_H/2,left:0,right:0,borderTop:`1px dashed ${C.border}44`,pointerEvents:"none"}}/>)}{showNow&&<div style={{position:"absolute",top:nowFrac*totalH*HOUR_H,left:0,right:0,borderTop:"2px solid #EF4444",zIndex:10,pointerEvents:"none"}}><div style={{position:"absolute",left:-4,top:-5,width:8,height:8,borderRadius:"50%",background:"#EF4444"}}/></div>}{assigned.map(t=>{const cfg=STATUS_CONFIG[t.status];const topPx=(t.startMin/60-START_H)*HOUR_H;const hPx=Math.max(36,(t.endMin-t.startMin)/60*HOUR_H-4);const cW=100/totalCols;const canAdv=STATUS_FLOW.includes(t.status)&&t.status!=="completado";return <div key={t.id} style={{position:"absolute",top:topPx+2,height:hPx,left:`calc(${t.col*cW}% + 2px)`,width:`calc(${cW}% - 4px)`,background:cfg.bg,border:`1.5px solid ${cfg.color}55`,borderLeft:`4px solid ${cfg.color}`,borderRadius:8,padding:"6px 8px",overflow:"hidden",cursor:"pointer",boxSizing:"border-box",zIndex:2}}><div style={{fontSize:11,fontWeight:800,color:cfg.color}}>{fmtTime(t.scheduledAt)}{t.endAt&&` → ${fmtTime(t.endAt)}`}</div><div style={{fontSize:12,fontWeight:700,color:"#1a1a2e",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{t.client}</div><div style={{fontSize:10,color:"#555",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{(t.trucks||[]).join(", ")} · {t.m3}m³{t.concreteType&&` · ${t.concreteType}`}</div>{hPx>90&&<div style={{display:"flex",gap:4,marginTop:6,flexWrap:"wrap"}}>{canAdv&&<button onClick={e=>{e.stopPropagation();onAdvance(t.id);}} style={{...S.calEventBtn,background:cfg.color,color:"#fff",fontSize:9}}>→ Avanzar</button>}<button onClick={e=>{e.stopPropagation();onEdit(t);}} style={{...S.calEventBtn,fontSize:9}}>✎</button></div>}</div>;})}</div></div></div>}</div>{showDetail&&dayTurns.length>0&&<div style={{...S.panel,maxHeight:220,overflowY:"auto",flexShrink:0}}><div style={{...S.panelTitle,marginBottom:10}}>Detalle del día</div>{dayTurns.map(t=><TurnCard key={t.id} turn={t} onAdvance={onAdvance} onEdit={onEdit} onCancel={onCancel} compact/>)}</div>}</div>);}
 
 function TrucksView({turns,trucks}){return <div style={S.truckGrid}>{trucks.map(tr=>{const hist=turns.filter(t=>(t.trucks||[]).includes(tr));const act=hist.find(t=>!["completado","cancelado"].includes(t.status));const comp=hist.filter(t=>t.status==="completado");const cfg=act?STATUS_CONFIG[act.status]:{label:"Libre",color:"#10B981",bg:"#D1FAE5"};return <div key={tr} style={S.truckCard}><div style={S.truckCardHeader}><span style={{fontSize:28}}>🚛</span><div><div style={S.truckCardName}>{tr}</div><div style={{...S.badge,background:cfg.bg,color:cfg.color}}>{cfg.label}</div></div></div>{act&&<div style={S.truckActive}><div style={S.truckActiveLabel}>Turno activo:</div><div style={S.truckActiveClient}>{act.client}</div><div style={S.truckActiveMeta}>{act.plant} · {act.m3}m³ · {fmtTime(act.scheduledAt)}{act.endAt&&` → ${fmtTime(act.endAt)}`}</div></div>}<div style={S.truckStats}><div style={S.truckStat}><span style={S.truckStatNum}>{comp.length}</span>Completados</div><div style={S.truckStat}><span style={S.truckStatNum}>{comp.reduce((s,t)=>s+t.m3,0)}</span>m³</div></div></div>;})}</div>;}
 
@@ -629,9 +714,14 @@ function TurnForm({initial,plants,trucks,users,concreteTypes,allTurns,currentUse
     <div style={{...S.formGroup,gridColumn:"1/-1"}}><label style={S.label}>Notas</label><textarea value={form.notes} onChange={e=>set("notes",e.target.value)} style={{...S.input,minHeight:52,resize:"vertical"}} placeholder="Observaciones…"/></div>
   </div><div style={S.modalFooter}><button onClick={onClose} style={S.btnSecondary}>Cancelar</button><button onClick={()=>{if(canSave)onSave({...form,m3:parseFloat(form.m3)});}} style={{...S.btnPrimary,opacity:canSave?1:.45,cursor:canSave?"pointer":"not-allowed"}}>{initial?"Guardar":"Crear turno"}</button></div></div></div>);}
 
-function RemitosView({remitos,onReprint}){
+function RemitosView({remitos,onReprint,onDelete}){
   const [q,setQ]=useState("");
+  const [confirming,setConfirming]=useState(null);
   const filtered=q.trim()?remitos.filter(r=>(r.cliente||"").toLowerCase().includes(q.toLowerCase())||String(r.numero).includes(q)||(r.camion||"").toLowerCase().includes(q.toLowerCase())):remitos;
+  function handleDeleteClick(numero){
+    if(confirming===numero){onDelete(numero);setConfirming(null);}
+    else{setConfirming(numero);setTimeout(()=>setConfirming(c=>c===numero?null:c),3000);}
+  }
   return(<div>
     <div style={S.filters}><input value={q} onChange={e=>setQ(e.target.value)} placeholder="Buscar por cliente, camión o N°…" style={{...S.select,minWidth:260}}/></div>
     {filtered.length===0&&<div style={S.empty}>Sin remitos{q?" que coincidan":""}</div>}
@@ -643,7 +733,10 @@ function RemitosView({remitos,onReprint}){
               <div style={S.turnClient}>N° {fmtRemitoNum(r.numero)} · {r.cliente}</div>
               <div style={S.turnMeta}>{r.fecha} · {r.producto}{r.cantidad?` · ${r.cantidad} m³`:""}{r.camion?` · ${r.camion}`:""}{r.chofer?` · ${r.chofer}`:""}</div>
             </div>
-            <button onClick={()=>onReprint(r)} style={S.btnSecondary}>🖨 Reimprimir</button>
+            <div style={{display:"flex",gap:8}}>
+              <button onClick={()=>onReprint(r)} style={S.btnSecondary}>🖨 Reimprimir</button>
+              {onDelete&&<button onClick={()=>handleDeleteClick(r.numero)} style={S.btnDanger}>{confirming===r.numero?"¿Seguro?":"Eliminar"}</button>}
+            </div>
           </div>
         </div>
       ))}
