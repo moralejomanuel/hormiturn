@@ -7,46 +7,71 @@
   color: #111;
   font-size: 11px;
   line-height: 1.35;
+  text-align: left; /* el contenedor de la app centra todo por defecto (#root) */
 }
-.rp-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: flex-start;
-  border-bottom: 2px solid #111;
-  padding-bottom: 6px;
+
+/* â”€â”€ Tarjetas con borde redondeado, estilo talonario â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
+.rp2-card {
+  border: 1.4px solid #111;
+  border-radius: 14px;
+  padding: 10px 14px;
   margin-bottom: 10px;
 }
-.rp-company { font-size: 18px; font-weight: 800; }
-.rp-sub { font-size: 11px; color: #444; }
-.rp-meta { text-align: right; }
-.rp-num { font-size: 14px; font-weight: 800; }
-.rp-date { font-size: 11px; color: #444; }
-.rp-section { margin-bottom: 10px; }
-.rp-section-title {
-  font-size: 10px;
-  font-weight: 800;
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
-  color: #444;
-  border-bottom: 1px solid #bbb;
-  margin-bottom: 4px;
-  padding-bottom: 2px;
+
+/* â”€â”€ Encabezado â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
+.rp2-headerbox { display: flex; justify-content: space-between; gap: 16px; }
+.rp2-hleft { flex: 1; }
+.rp2-brandrow { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 6px; }
+.rp2-company { font-size: 18px; font-weight: 800; font-style: italic; letter-spacing: 0.3px; }
+.rp2-sub { font-size: 11px; font-style: italic; color: #444; }
+.rp2-badge { height: 44px; width: auto; object-fit: contain; flex-shrink: 0; }
+.rp2-contact { font-size: 10px; color: #222; }
+.rp2-contact div { margin-top: 1px; }
+
+.rp2-hright { text-align: right; flex-shrink: 0; min-width: 190px; display: flex; flex-direction: column; align-items: flex-end; }
+.rp2-novalido { font-size: 9px; font-style: italic; color: #333; }
+.rp2-bar { width: 100%; max-width: 170px; height: 7px; background: #111; margin: 6px 0; }
+.rp2-num { font-size: 16px; font-weight: 800; font-style: italic; margin-bottom: 8px; }
+.rp2-fecha { font-size: 11px; font-weight: 800; font-style: italic; }
+.rp2-fecha span { font-weight: 400; font-style: normal; }
+
+/* â”€â”€ Filas de dos columnas con lÃ­neas tipo "a completar" â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
+.rp2-cols { display: flex; gap: 24px; }
+.rp2-col { flex: 1; }
+.rp2-line { display: flex; align-items: baseline; gap: 6px; padding: 5px 0; }
+.rp2-flabel { font-style: italic; font-weight: 600; white-space: nowrap; color: #222; }
+.rp2-fval { flex: 1; border-bottom: 1px dotted #888; min-height: 13px; padding-bottom: 1px; }
+
+/* â”€â”€ Tabla de producto y dosificaciÃ³n â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
+.rp2-tablebox { padding: 0; overflow: hidden; }
+.rp2-table { width: 100%; border-collapse: collapse; }
+.rp2-table th, .rp2-table td {
+  border: 1px solid #111;
+  padding: 6px 8px;
+  text-align: center;
+  font-size: 11px;
 }
-.rp-field {
-  display: flex;
-  gap: 6px;
-  padding: 2px 0;
-  border-bottom: 1px dashed #ddd;
-}
-.rp-label {
-  width: 130px;
-  flex-shrink: 0;
-  font-weight: 700;
-  color: #333;
-}
-.rp-val { flex: 1; }
-.rp-obs { white-space: pre-wrap; }
-.rp-signature { margin-top: 24px; }
+.rp2-table th { font-style: italic; font-weight: 700; background: #f4f4f4; }
+.rp2-table td { height: 30px; }
+.rp2-table tr:first-child th:first-child,
+.rp2-table tr:first-child th:nth-child(2),
+.rp2-table tr:first-child th:nth-child(3),
+.rp2-table tr:first-child th:nth-child(4) { border-top: none; }
+.rp2-table, .rp2-table tr:first-child th { border-top: none; }
+.rp2-table tr:last-child td { border-bottom: none; }
+.rp2-table tr th:first-child, .rp2-table tr td:first-child { border-left: none; }
+.rp2-table tr th:last-child, .rp2-table tr td:last-child { border-right: none; }
+
+/* â”€â”€ Chofer / camiÃ³n / agua / firma â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
+.rp2-driverbox { gap: 0; }
+.rp2-driverbox .rp2-col:first-child { padding-right: 16px; }
+.rp2-colright { border-left: 1.4px solid #111; padding-left: 16px; text-align: center; }
+.rp2-subtitle { font-size: 11px; font-weight: 800; font-style: italic; margin: 4px 0; }
+.rp2-fillline, .rp2-signline { border-bottom: 1px dotted #888; min-height: 16px; margin-bottom: 6px; }
+
+/* â”€â”€ Observaciones â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
+.rp2-obsbox { min-height: 70px; }
+.rp2-obs { white-space: pre-wrap; font-size: 11px; margin-top: 4px; }
 
 @media print {
   @page { size: A4; margin: 12mm; }
