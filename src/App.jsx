@@ -592,9 +592,19 @@ export default function App() {
   async function handleCancel(id){await supabase.from("turns").update({status:"cancelado"}).eq("id",id);}
   async function handleDelete(id){await supabase.from("turns").delete().eq("id",id);}
 
-  async function handleRemitoGenerated(camion){
-    if(!camion) return;
-    const active=pickTurnForRemito(turns.filter(t=>(t.trucks||[]).some(tr=>tr.toLowerCase()===camion.toLowerCase())&&!["completado","cancelado"].includes(t.status)));
+  async function handleRemitoGenerated(camion,cliente){
+    const norm=s=>(s||"").trim().toLowerCase();
+    const activeTurns=turns.filter(t=>!["completado","cancelado"].includes(t.status));
+    const truckMatch=t=>camion&&(t.trucks||[]).some(tr=>norm(tr)===norm(camion));
+    const clientMatch=t=>cliente&&norm(t.client)===norm(cliente);
+    // El camión que termina yendo a una entrega no siempre es el que se planificó en el turno
+    // (se cambian sobre la marcha). Por eso, para decidir qué turno avanzar, priorizamos que
+    // coincidan cliente Y camión; si no hay coincidencia exacta, alcanza con que coincida el
+    // cliente (lo más confiable); recién si eso tampoco da resultado, probamos solo por camión.
+    let candidates=activeTurns.filter(t=>truckMatch(t)&&clientMatch(t));
+    if(!candidates.length) candidates=activeTurns.filter(clientMatch);
+    if(!candidates.length) candidates=activeTurns.filter(truckMatch);
+    const active=pickTurnForRemito(candidates);
     if(active&&(active.status==="pendiente"||active.status==="en_planta")){
       await supabase.from("turns").update({status:"en_ruta"}).eq("id",active.id);
     }
@@ -612,7 +622,7 @@ export default function App() {
     };
     const {data:inserted,error}=await supabase.from("remitos").insert(row).select().single();
     if(error){window.alert("No se pudo guardar el remito: "+error.message);return null;}
-    if(data.camion) await handleRemitoGenerated(data.camion);
+    await handleRemitoGenerated(data.camion,data.cliente);
     setShowRemitoForm(false);
     printRemito(inserted);
     return inserted;
