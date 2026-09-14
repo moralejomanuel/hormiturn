@@ -349,6 +349,17 @@ function exportChoferSummaryCSV(summaryRows,desde,hasta) {
   URL.revokeObjectURL(url);
 }
 
+// Imprime (en una hoja aparte, para entregar a administración) el listado de
+// remitos generados en un día puntual — dayRemitos ya debe venir filtrado por día.
+function printRemitosDaySummary(dayRemitos,day) {
+  const sorted=[...dayRemitos].sort((a,b)=>a.numero-b.numero);
+  const numAR=n=>String(Math.round(n*100)/100).replace(".",",");
+  const rows=sorted.map(r=>`<tr><td>${fmtRemitoNum(r.numero)}</td><td>${escapeHtml(r.cliente||"—")}</td><td>${escapeHtml(r.producto||"—")}</td><td>${r.cantidad?escapeHtml(String(r.cantidad))+" m³":"—"}</td><td>${escapeHtml(r.camion||"—")}</td><td>${escapeHtml(r.chofer||"—")}</td><td>${escapeHtml(r.confeccionado_por||"—")}</td></tr>`).join("");
+  const totalM3=sorted.reduce((s,r)=>s+(parseFloat(String(r.cantidad||"").replace(",","."))||0),0);
+  const html=`<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"/><title>Remitos</title><style>*{margin:0;padding:0;box-sizing:border-box;}body{font-family:Arial,sans-serif;font-size:12px;color:#111;padding:24px;}h1{font-size:20px;margin-bottom:4px;}.subtitle{color:#555;margin-bottom:20px;font-size:13px;}table{width:100%;border-collapse:collapse;}th{background:#1a1a2e;color:white;padding:8px 10px;text-align:left;font-size:11px;text-transform:uppercase;letter-spacing:0.5px;}td{padding:8px 10px;border-bottom:1px solid #e5e5e5;vertical-align:top;}tr:nth-child(even) td{background:#f9f9f9;}.total{margin-top:16px;font-size:13px;}.footer{margin-top:32px;font-size:11px;color:#999;border-top:1px solid #eee;padding-top:10px;}@media print{@page{size:A4;margin:14mm;}}</style></head><body><h1>⬡ HormiTurn — Remitos del día</h1><div class="subtitle">${fmtDateLong(parseDay(day).getTime())} · ${fmtDate(Date.now())} ${fmtTime(Date.now())}</div>${sorted.length===0?"<p>No hay remitos.</p>":`<table><thead><tr><th>N°</th><th>Cliente</th><th>Producto</th><th>Cantidad</th><th>Camión</th><th>Chofer</th><th>Confeccionó</th></tr></thead><tbody>${rows}</tbody></table><div class="total">Total: <strong>${sorted.length}</strong> remito${sorted.length!==1?"s":""} · <strong>${numAR(totalM3)} m³</strong></div>`}<div class="footer">HormiTurn · Sistema de Gestión de Despacho de Hormigón</div></body></html>`;
+  const w=window.open("","_blank"); w.document.write(html); w.document.close(); w.focus(); setTimeout(()=>w.print(),500);
+}
+
 // ── MAPA ──────────────────────────────────────────────────────────────────────
 function MapView({turns,infotrakConfig,plantsGeo,onUpdateStatus}) {
   const mapRef=useRef(null); const mapInstance=useRef(null); const markersRef=useRef({}); const circlesRef=useRef({});
@@ -848,7 +859,9 @@ function RemitosView({remitos,onReprint,onDelete}){
   const today=dayKey(Date.now());
   const [desde,setDesde]=useState(today.slice(0,7)+"-01");
   const [hasta,setHasta]=useState(today);
-  const filtered=q.trim()?remitos.filter(r=>(r.cliente||"").toLowerCase().includes(q.toLowerCase())||String(r.numero).includes(q)||(r.camion||"").toLowerCase().includes(q.toLowerCase())):remitos;
+  const [filterDate,setFilterDate]=useState(today);
+  const byDate=filterDate?remitos.filter(r=>r.fecha===filterDate):remitos;
+  const filtered=q.trim()?byDate.filter(r=>(r.cliente||"").toLowerCase().includes(q.toLowerCase())||String(r.numero).includes(q)||(r.camion||"").toLowerCase().includes(q.toLowerCase())):byDate;
   const summaryRows=useMemo(()=>{
     const inRange=remitos.filter(r=>r.fecha>=desde&&r.fecha<=hasta);
     const map={};
@@ -869,6 +882,9 @@ function RemitosView({remitos,onReprint,onDelete}){
   return(<div>
     <div style={S.filters}>
       <input value={q} onChange={e=>setQ(e.target.value)} placeholder="Buscar por cliente, camión o N°…" style={{...S.select,minWidth:260}}/>
+      <input type="date" value={filterDate} onChange={e=>setFilterDate(e.target.value)} style={S.select}/>
+      {filterDate&&<button onClick={()=>setFilterDate("")} style={S.btnSecondary}>Todas las fechas</button>}
+      <button onClick={()=>printRemitosDaySummary(byDate,filterDate||today)} style={{...S.btnSecondary,opacity:filterDate?1:.45,cursor:filterDate?"pointer":"not-allowed"}} disabled={!filterDate} title={filterDate?"":"Elegí una fecha para imprimir su resumen"}>🖨 Imprimir resumen del día</button>
       <button onClick={()=>setShowSummary(v=>!v)} style={S.btnSecondary}>📊 {showSummary?"Ocultar resumen":"Resumen por chofer"}</button>
     </div>
     {showSummary&&<div style={{...S.panel,marginBottom:20}}>
