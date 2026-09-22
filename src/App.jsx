@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useMemo } from "react";
+import { useState, useEffect, useRef, useMemo, useCallback } from "react";
 import { supabase } from "./supabase";
 
 const TRUCK_CAPACITY = 8;
@@ -485,8 +485,11 @@ function MapView({turns,infotrakConfig,plantsGeo,onUpdateStatus}) {
   );
 }
 
+function getStoredUser(){try{return localStorage.getItem("hormiturn_user")||null;}catch{return null;}}
+function setStoredUser(u){try{if(u)localStorage.setItem("hormiturn_user",u);else localStorage.removeItem("hormiturn_user");}catch{/* ignore */}}
+
 export default function App() {
-  const [currentUser,setCurrentUser]=useState(null);
+  const [currentUser,setCurrentUser]=useState(getStoredUser);
   const [turns,setTurns]=useState([]);
   const [plants,setPlants]=useState([]);
   const [trucks,setTrucks]=useState([]);
@@ -516,49 +519,58 @@ export default function App() {
   const [showRemitoForm,setShowRemitoForm]=useState(false);
   const [permissions,setPermissions]=useState({});
 
-  useEffect(()=>{
-    async function load(){
-      setLoading(true);
-      const {data:cfg}=await supabase.from("config").select("*");
-      if(cfg){cfg.forEach(row=>{
-        if(row.key==="plants") setPlants(row.value);
-        if(row.key==="trucks") setTrucks(row.value);
-        if(row.key==="users"){setUsers(row.value);if(row.passwords)setPasswords(row.passwords);}
-        if(row.key==="concrete_types") setConcreteTypes(row.value);
-        if(row.key==="infotrak") setInfotrakConfig(row.value);
-        if(row.key==="plants_geo") setPlantsGeo(row.value);
-        if(row.key==="email_config") setEmailConfig(row.value);
-        if(row.key==="user_emails") setUserEmails(row.value||{});
-        if(row.key==="choferes") setChoferes(row.value);
-        if(row.key==="patentes") setPatentes(row.value||{});
-        if(row.key==="permissions") setPermissions(row.value||{});
-      });}
-      const {data:dbTurns}=await supabase.from("turns").select("*").order("scheduled_at");
-      if(dbTurns) setTurns(dbTurns.map(dbToTurn));
-      const {data:dbRemitos}=await supabase.from("remitos").select("*").order("numero",{ascending:false});
-      if(dbRemitos) setRemitos(dbRemitos);
-      setLoading(false);
-    }
-    load();
+  // load(): trae el estado completo desde Supabase. Se usa en la carga inicial, como respaldo
+  // periódico (por si el realtime no llega) y al volver a la pestaña/ventana.
+  const load=useCallback(async()=>{
+    const {data:cfg}=await supabase.from("config").select("*");
+    if(cfg){cfg.forEach(row=>{
+      if(row.key==="plants") setPlants(row.value);
+      if(row.key==="trucks") setTrucks(row.value);
+      if(row.key==="users"){setUsers(row.value);if(row.passwords)setPasswords(row.passwords);}
+      if(row.key==="concrete_types") setConcreteTypes(row.value);
+      if(row.key==="infotrak") setInfotrakConfig(row.value);
+      if(row.key==="plants_geo") setPlantsGeo(row.value);
+      if(row.key==="email_config") setEmailConfig(row.value);
+      if(row.key==="user_emails") setUserEmails(row.value||{});
+      if(row.key==="choferes") setChoferes(row.value);
+      if(row.key==="patentes") setPatentes(row.value||{});
+      if(row.key==="permissions") setPermissions(row.value||{});
+    });}
+    const {data:dbTurns}=await supabase.from("turns").select("*").order("scheduled_at");
+    if(dbTurns) setTurns(dbTurns.map(dbToTurn));
+    const {data:dbRemitos}=await supabase.from("remitos").select("*").order("numero",{ascending:false});
+    if(dbRemitos) setRemitos(dbRemitos);
   },[]);
 
+  useEffect(()=>{
+    (async()=>{setLoading(true);await load();setLoading(false);})();
+  },[load]);
+
+  // Suscripciones realtime: reciben los cambios de otros usuarios al instante. Si un canal no
+  // llega a suscribirse (por ej. Realtime deshabilitado en Supabase para esa tabla, corte de red,
+  // etc.) no nos quedamos esperando: se loguea el estado y el efecto de respaldo de abajo se
+  // encarga de refrescar igual por polling.
   useEffect(()=>{
     const ch=supabase.channel("turns-rt")
       .on("postgres_changes",{event:"INSERT",schema:"public",table:"turns"},p=>setTurns(prev=>[...prev,dbToTurn(p.new)]))
       .on("postgres_changes",{event:"UPDATE",schema:"public",table:"turns"},p=>setTurns(prev=>prev.map(t=>t.id===p.new.id?dbToTurn(p.new):t)))
       .on("postgres_changes",{event:"DELETE",schema:"public",table:"turns"},p=>setTurns(prev=>prev.filter(t=>t.id!==p.old.id)))
-      .subscribe();
+      .subscribe(status=>{
+        if(status==="CHANNEL_ERROR"||status==="TIMED_OUT"){console.warn("[hormiturn] turns-rt",status,"- refrescando por polling mientras tanto");load();}
+      });
     return()=>supabase.removeChannel(ch);
-  },[]);
+  },[load]);
 
   useEffect(()=>{
     const ch=supabase.channel("remitos-rt")
       .on("postgres_changes",{event:"INSERT",schema:"public",table:"remitos"},p=>setRemitos(prev=>prev.some(r=>r.numero===p.new.numero)?prev:[p.new,...prev]))
       .on("postgres_changes",{event:"UPDATE",schema:"public",table:"remitos"},p=>setRemitos(prev=>prev.map(r=>r.numero===p.new.numero?p.new:r)))
       .on("postgres_changes",{event:"DELETE",schema:"public",table:"remitos"},p=>setRemitos(prev=>prev.filter(r=>r.numero!==p.old.numero)))
-      .subscribe();
+      .subscribe(status=>{
+        if(status==="CHANNEL_ERROR"||status==="TIMED_OUT"){console.warn("[hormiturn] remitos-rt",status,"- refrescando por polling mientras tanto");load();}
+      });
     return()=>supabase.removeChannel(ch);
-  },[]);
+  },[load]);
 
   useEffect(()=>{
     const ch=supabase.channel("config-rt")
@@ -575,11 +587,30 @@ export default function App() {
         if(row.key==="patentes") setPatentes(row.value||{});
         if(row.key==="permissions") setPermissions(row.value||{});
       })
-      .subscribe();
+      .subscribe(status=>{
+        if(status==="CHANNEL_ERROR"||status==="TIMED_OUT"){console.warn("[hormiturn] config-rt",status,"- refrescando por polling mientras tanto");load();}
+      });
     return()=>supabase.removeChannel(ch);
-  },[]);
+  },[load]);
+
+  // Red de seguridad: aunque el realtime funcione bien, refrescamos solos cada 25s (si la pestaña
+  // está visible) y también apenas la pestaña/ventana vuelve a tener foco. Así, aunque algún canal
+  // falle en silencio, nunca hace falta apretar F5 a mano para ver cambios de otro usuario.
+  useEffect(()=>{
+    const poll=setInterval(()=>{if(document.visibilityState==="visible")load();},25000);
+    function onFocus(){if(document.visibilityState==="visible")load();}
+    document.addEventListener("visibilitychange",onFocus);
+    window.addEventListener("focus",onFocus);
+    return()=>{clearInterval(poll);document.removeEventListener("visibilitychange",onFocus);window.removeEventListener("focus",onFocus);};
+  },[load]);
 
   useEffect(()=>{const i=setInterval(()=>setNow(Date.now()),30000);return()=>clearInterval(i);},[]);
+
+  // Si el usuario guardado en este dispositivo ya no existe (por ej. lo borró un admin), lo
+  // desloguea en vez de dejarlo con una sesión "fantasma".
+  useEffect(()=>{
+    if(currentUser&&users.length&&!users.includes(currentUser)){handleLogout();}
+  },[currentUser,users]);
 
   useEffect(()=>{
     const perm=permissions[currentUser];
@@ -659,7 +690,8 @@ export default function App() {
   async function removeConcreteType(v){const next=concreteTypes.filter(x=>x!==v);setConcreteTypes(next);await saveConfig("concrete_types",next);}
   async function setPassword(user,pw){const nextPw={...passwords,[user]:pw};setPasswords(nextPw);await saveConfig("users",users,{passwords:nextPw});}
   async function setUserEmail(user,email){const next={...userEmails,[user]:email};setUserEmails(next);await supabase.from("config").update({value:next}).eq("key","user_emails");}
-  function handleLogin(user,pw){const stored=passwords[user];if(!stored){setCurrentUser(user);return true;}if(stored===pw){setCurrentUser(user);return true;}return false;}
+  function handleLogin(user,pw){const stored=passwords[user];if(!stored){setCurrentUser(user);setStoredUser(user);return true;}if(stored===pw){setCurrentUser(user);setStoredUser(user);return true;}return false;}
+  function handleLogout(){setCurrentUser(null);setStoredUser(null);}
 
   async function handleSendEmail(){
     setEmailStatus("sending");
@@ -692,7 +724,7 @@ export default function App() {
         </nav>
         <div style={S.sidebarFooter}>
           <div style={S.userBadge}><div style={S.userAvatar}>{currentUser[0]}</div><div><div style={S.userName}>{currentUser}</div><div style={S.userRole}>En línea</div></div></div>
-          <button onClick={()=>setCurrentUser(null)} style={S.logoutBtn}>← Salir</button>
+          <button onClick={handleLogout} style={S.logoutBtn}>← Salir</button>
         </div>
       </aside>
       <main style={S.main}>
