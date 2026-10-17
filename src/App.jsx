@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useMemo, useCallback } from "react";
 import { supabase } from "./supabase";
+import * as XLSX from "xlsx";
 
 const TRUCK_CAPACITY = 8;
 const INFOTRAK_API = "https://ver.infotrak.com.ar:8144/api";
@@ -347,6 +348,40 @@ function exportChoferSummaryCSV(summaryRows,desde,hasta) {
   a.download=`remitos_por_chofer_${desde}_a_${hasta}.csv`;
   document.body.appendChild(a); a.click(); document.body.removeChild(a);
   URL.revokeObjectURL(url);
+}
+
+// Exporta a un único .xlsx (dos hojas) los remitos emitidos entre "desde" y "hasta":
+// "Remitos" con el detalle remito por remito, y "Resumen por chofer" con los totales
+// (igual que exportChoferSummaryCSV, pero en Excel real en vez de CSV).
+function exportRemitosXLSX(remitosEnRango,summaryRows,desde,hasta) {
+  const m3de=r=>{const n=parseFloat(String(r.cantidad??"").replace(",","."));return Number.isFinite(n)?n:(r.cantidad||"");};
+  const detalle=remitosEnRango.slice().sort((a,b)=>a.numero-b.numero).map(r=>({
+    "N°":fmtRemitoNum(r.numero),
+    "Fecha":r.fecha,
+    "Cliente":r.cliente||"",
+    "Domicilio":r.domicilio||"",
+    "Producto":r.producto||"",
+    "Cantidad (m³)":m3de(r),
+    "Camión":r.camion||"",
+    "Patente":r.patente||"",
+    "Chofer":r.chofer||"",
+    "Confeccionó":r.confeccionado_por||"",
+    "Observaciones":r.observaciones||"",
+  }));
+  const totalM3=summaryRows.reduce((s,r)=>s+r.m3,0);
+  const totalCount=summaryRows.reduce((s,r)=>s+r.count,0);
+  const resumen=[
+    ...summaryRows.map(r=>({"Chofer":r.chofer,"Remitos":r.count,"m³ entregados":Number(r.m3.toFixed(2))})),
+    {"Chofer":"TOTAL","Remitos":totalCount,"m³ entregados":Number(totalM3.toFixed(2))},
+  ];
+  const wb=XLSX.utils.book_new();
+  const wsDetalle=XLSX.utils.json_to_sheet(detalle.length?detalle:[{"N°":"","Fecha":"","Cliente":"Sin remitos en este rango de fechas"}]);
+  wsDetalle["!cols"]=[{wch:8},{wch:11},{wch:22},{wch:22},{wch:14},{wch:13},{wch:12},{wch:12},{wch:18},{wch:16},{wch:28}];
+  const wsResumen=XLSX.utils.json_to_sheet(resumen);
+  wsResumen["!cols"]=[{wch:22},{wch:12},{wch:14}];
+  XLSX.utils.book_append_sheet(wb,wsDetalle,"Remitos");
+  XLSX.utils.book_append_sheet(wb,wsResumen,"Resumen por chofer");
+  XLSX.writeFile(wb,`remitos_${desde}_a_${hasta}.xlsx`);
 }
 
 // Imprime (en una hoja aparte, para entregar a administración) el listado de
@@ -894,17 +929,17 @@ function RemitosView({remitos,onReprint,onDelete}){
   const [filterDate,setFilterDate]=useState(today);
   const byDate=filterDate?remitos.filter(r=>r.fecha===filterDate):remitos;
   const filtered=q.trim()?byDate.filter(r=>(r.cliente||"").toLowerCase().includes(q.toLowerCase())||String(r.numero).includes(q)||(r.camion||"").toLowerCase().includes(q.toLowerCase())):byDate;
+  const remitosEnRango=useMemo(()=>remitos.filter(r=>r.fecha>=desde&&r.fecha<=hasta),[remitos,desde,hasta]);
   const summaryRows=useMemo(()=>{
-    const inRange=remitos.filter(r=>r.fecha>=desde&&r.fecha<=hasta);
     const map={};
-    inRange.forEach(r=>{
+    remitosEnRango.forEach(r=>{
       const ch=r.chofer||"— Sin chofer —";
       const m3=parseFloat(String(r.cantidad||"").replace(",","."))||0;
       if(!map[ch])map[ch]={chofer:ch,count:0,m3:0};
       map[ch].count++; map[ch].m3+=m3;
     });
     return Object.values(map).sort((a,b)=>b.m3-a.m3);
-  },[remitos,desde,hasta]);
+  },[remitosEnRango]);
   const totalM3=summaryRows.reduce((s,r)=>s+r.m3,0);
   const totalCount=summaryRows.reduce((s,r)=>s+r.count,0);
   function handleDeleteClick(numero){
@@ -930,6 +965,7 @@ function RemitosView({remitos,onReprint,onDelete}){
           <span style={{color:C.muted,fontSize:13}}>a</span>
           <input type="date" value={hasta} onChange={e=>setHasta(e.target.value)} style={S.select}/>
           <button onClick={()=>exportChoferSummaryCSV(summaryRows,desde,hasta)} style={S.btnSecondary}>📊 Exportar CSV</button>
+          <button onClick={()=>exportRemitosXLSX(remitosEnRango,summaryRows,desde,hasta)} style={S.btnSecondary}>📥 Exportar Excel</button>
         </div>
       </div>
       {summaryRows.length===0?<div style={S.empty}>Sin remitos en ese rango de fechas</div>:
